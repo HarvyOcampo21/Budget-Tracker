@@ -1,7 +1,7 @@
 // Bump this to match APP_VERSION in index.html on every release.
 // Changing it forces Safari's standalone app to drop the old cached app shell
 // and fetch the new files instead of silently serving stale ones.
-const CACHE_NAME = "our-budget-v1.3.0";
+const CACHE_NAME = "our-budget-v1.4.0";
 const APP_SHELL = [
   "./index.html",
   "./style.css",

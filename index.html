@@ -19,6 +19,36 @@
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
+
+<!-- LOGIN — gates the entire app before any data loads. Not part of the
+     nav's .screen set on purpose, so no nav click or auto-refresh can bypass
+     it; it's a fixed overlay that simply covers #app until a session exists. -->
+<div class="login-screen" id="loginScreen" style="display:none">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="eyebrow">Our Budget</div>
+      <h1>Welcome back</h1>
+    </div>
+
+    <label style="margin-top:0">Username</label>
+    <input type="text" id="loginUsername" placeholder="Your username" autocomplete="username">
+
+    <label>Password</label>
+    <input type="password" id="loginPassword" placeholder="Your password" autocomplete="current-password">
+
+    <div class="login-error" id="loginError" style="display:none"></div>
+
+    <button class="primary" id="loginBtn">Log in</button>
+
+    <button class="link" id="toggleLoginConnBtn" style="margin-top:18px">Connection settings</button>
+    <div id="loginConnFields" style="display:none;margin-top:10px">
+      <label style="margin-top:0">Apps Script Web App URL</label>
+      <input type="text" id="loginApiUrl" placeholder="https://script.google.com/macros/s/.../exec">
+      <button class="ghost" id="loginSaveConnBtn">Save URL</button>
+    </div>
+  </div>
+</div>
+
 <div id="app">
   <div class="pull-indicator" id="pullIndicator">
     <span class="spinner" id="pullSpinner" style="display:none"></span>
@@ -298,11 +328,17 @@
     <!-- SETTINGS -->
     <section class="screen" id="screen-settings">
       <div class="card">
+        <h3>Account</h3>
+        <div class="row">
+          <span class="label" style="font-size:11px;color:var(--paper-dim);text-transform:uppercase;letter-spacing:.08em">Logged in as</span>
+          <span class="mono" id="accountUsernameLabel" style="font-weight:600">—</span>
+        </div>
+        <button class="ghost" id="logoutBtn" style="margin-top:14px">Log out</button>
+      </div>
+      <div class="card">
         <h3>Connection</h3>
-        <label>Apps Script Web App URL</label>
+        <label style="margin-top:0">Apps Script Web App URL</label>
         <input type="text" id="sApiUrl" placeholder="https://script.google.com/macros/s/.../exec">
-        <label>Passcode</label>
-        <input type="text" id="sPasscode" placeholder="Shared passcode">
         <button class="primary" id="saveConnBtn">Save & connect</button>
         <button class="ghost" id="testConnBtn">Test connection</button>
       </div>

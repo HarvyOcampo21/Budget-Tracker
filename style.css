@@ -249,3 +249,23 @@
   }
   .add-home-banner b{ color:var(--paper); font-weight:600; }
   .add-home-banner button{ flex:0 0 auto; background:none; border:none; color:var(--paper-dim); font-size:15px; cursor:pointer; padding:2px 6px; }
+
+  /* Login — fixed overlay above everything else (z-index above nav.bottom's
+     stacking and the toast) so no click, timer, or gesture on the app
+     underneath is reachable until a session exists. */
+  .login-screen{
+    position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+    background:var(--grad); padding:24px;
+    padding-top:calc(24px + env(safe-area-inset-top)); padding-bottom:calc(24px + env(safe-area-inset-bottom));
+  }
+  .login-card{
+    width:100%; max-width:380px; background:var(--surface); border-radius:var(--radius);
+    padding:30px 24px; box-shadow:0 20px 50px rgba(36,31,69,0.35);
+  }
+  .login-brand{ text-align:center; margin-bottom:20px; }
+  .login-brand .eyebrow{ font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--paper-dim); }
+  .login-brand h1{ margin:4px 0 0; font-size:24px; color:var(--paper); }
+  .login-error{
+    background:var(--coral-soft); color:var(--coral); border-radius:10px; padding:10px 12px;
+    font-size:13px; font-weight:600; margin-top:14px; line-height:1.4;
+  }

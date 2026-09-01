@@ -12,7 +12,7 @@
  * (Deploy > Manage deployments > Edit > New version > Deploy).
  *
  * ============================================================
- * SCRIPT VERSION: 1.0.4
+ * SCRIPT VERSION: 1.1.0
  * ------------------------------------------------------------
  * This is this file's OWN version number — it only moves when
  * Code.gs itself changes (a new action, a new sheet/column, a
@@ -26,6 +26,28 @@
  * what changed in the backend.
  * ------------------------------------------------------------
  * CHANGELOG
+ *   v1.1.0 – Replaced the single shared PASSCODE with per-person
+ *            login. Added Users (username, passwordHash, salt,
+ *            displayName, createdAt) and Sessions (token,
+ *            username, createdAt — no expiry, sessions last until
+ *            explicit logout) sheets. checkAuth_ now validates a
+ *            token against Sessions instead of comparing a shared
+ *            secret; it's still the single choke point at the top
+ *            of doGet/doPost, so every existing action is
+ *            unchanged behind it. New unauthenticated "login"
+ *            action (POST only — a password has no business in a
+ *            URL/GET) hashes the submitted password with the
+ *            user's stored salt (salted, iterated SHA-256 via
+ *            hashPassword_) and compares it to passwordHash; a
+ *            match creates a Sessions row and returns its token.
+ *            New "logout" action deletes the matching Sessions
+ *            row. Accounts are seeded once per person via a new
+ *            manual createUser_(username, password, displayName)
+ *            function, run from the Apps Script editor exactly
+ *            like initialize() — there is no public sign-up
+ *            action, since this is a closed 2-person app and one
+ *            would be a real hole. PASSCODE and all shared-secret
+ *            logic are removed.
  *   v1.0.4 – Fixed a date bug in rowToObj_: Sheets auto-converts
  *            plain "yyyy-MM-dd" strings into real Date cells, and
  *            reading those back returned raw Date objects that
@@ -70,15 +92,21 @@
  */
 
 // ------- CONFIG -------
-const PASSCODE = "CHANGE_ME"; // shared passcode for you two. Change this!
 const SHEET_NAMES = {
   TX: "Transactions",
   CAT: "Categories",
   GOALS: "SavingsGoals",
   SETTINGS: "Settings",
   FUND: "FoodFund",
-  DEBTS: "Debts"
+  DEBTS: "Debts",
+  USERS: "Users",
+  SESSIONS: "Sessions"
 };
+
+// Salted SHA-256, stretched with many iterations, as a lightweight KDF.
+// Apps Script has no bcrypt/scrypt/argon2 built in; this is reasonable for a
+// closed 2-user app but is NOT adequate for a public-facing product at scale.
+const HASH_ITERATIONS = 10000;
 
 // ------- SETUP (run this once manually from the Apps Script editor) -------
 function initialize() {
@@ -138,8 +166,25 @@ function initialize() {
     debts.appendRow(["id", "fromWho", "toWho", "amount", "reason", "date", "status", "createdAt", "settledAt", "linkedTransactionId"]);
   }
 
+  // Added in SCRIPT VERSION 1.1.0 for per-person login. No default rows are
+  // seeded here on purpose — there's no public sign-up, so accounts are
+  // created once per person via createUser_() run manually from the editor.
+  const users = getOrCreateSheet_(ss, SHEET_NAMES.USERS);
+  if (users.getLastRow() === 0) {
+    users.appendRow(["username", "passwordHash", "salt", "displayName", "createdAt"]);
+  }
+
+  // No expiry column — sessions are persistent until explicit logout, per
+  // this app's requirements. Rows here ARE the source of truth checkAuth_
+  // validates every request against.
+  const sessions = getOrCreateSheet_(ss, SHEET_NAMES.SESSIONS);
+  if (sessions.getLastRow() === 0) {
+    sessions.appendRow(["token", "username", "createdAt"]);
+  }
+
   SpreadsheetApp.flush();
   Logger.log("Initialized. Tabs: " + Object.values(SHEET_NAMES).join(", "));
+  Logger.log("Next: create your two accounts by running createUser_('username','password','Display Name') once each from this editor.");
 }
 
 function getOrCreateSheet_(ss, name) {
@@ -181,7 +226,10 @@ function ensureSettingKey_(sheet, key, defaultValue) {
 function doGet(e) {
   try {
     const action = e.parameter.action;
-    checkAuth_(e.parameter.passcode);
+    // Login takes a password and must never be a GET (URLs land in browser
+    // history and Apps Script access logs) — every doGet action is data, so
+    // all of them require an already-valid session token.
+    checkAuth_(e.parameter.token);
 
     let result;
     switch (action) {
@@ -203,10 +251,21 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
-    checkAuth_(body.passcode);
+
+    // "login" is the one action allowed without a valid session — it's how
+    // you get one. Every other action still goes through checkAuth_ below,
+    // unchanged from how the old shared-passcode check worked.
+    if (body.action === "login") {
+      return jsonOut_({ ok: true, data: login_(body.payload) });
+    }
+
+    checkAuth_(body.token);
 
     let result;
     switch (body.action) {
+      case "logout":
+        result = logout_(body.token);
+        break;
       case "addTransaction":
         result = addTransaction_(body.payload);
         break;
@@ -258,10 +317,18 @@ function doPost(e) {
   }
 }
 
-function checkAuth_(passcode) {
-  if (PASSCODE && passcode !== PASSCODE) {
-    throw new Error("Invalid passcode");
+// Single choke point for every action except "login". Errors here are
+// prefixed "AUTH: " so the frontend can tell "you need to log in again"
+// apart from an ordinary network/backend failure and route accordingly,
+// instead of parsing free-form error text.
+function checkAuth_(token) {
+  if (!token) throw new Error("AUTH: Not logged in");
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === token) return; // valid session
   }
+  throw new Error("AUTH: Invalid or expired session");
 }
 
 function jsonOut_(obj) {
@@ -348,6 +415,89 @@ function rowToObj_(header, row) {
     obj[h] = v;
   });
   return obj;
+}
+
+// ------- AUTH: login / logout / accounts -------
+
+// Verifies username + password and, on match, creates and returns a new
+// session token. Deliberately returns the same generic error whether the
+// username doesn't exist or the password is wrong, so a failed attempt can't
+// be used to enumerate valid usernames.
+function login_(payload) {
+  const username = ((payload && payload.username) || "").trim();
+  const password = (payload && payload.password) || "";
+  const genericError = "Invalid username or password";
+  if (!username || !password) throw new Error(genericError);
+
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = sh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const col = {
+    username: header.indexOf("username"),
+    passwordHash: header.indexOf("passwordHash"),
+    salt: header.indexOf("salt"),
+    displayName: header.indexOf("displayName")
+  };
+
+  const row = rows.find(r => r[col.username] === username);
+  if (!row) throw new Error(genericError);
+
+  const computedHash = hashPassword_(password, row[col.salt]);
+  if (computedHash !== row[col.passwordHash]) throw new Error(genericError);
+
+  const sessionsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const token = Utilities.getUuid();
+  sessionsSh.appendRow([token, username, new Date().toISOString()]);
+
+  return { token, username, displayName: row[col.displayName] || username };
+}
+
+// Deletes the matching Sessions row so a replayed copy of this token is
+// rejected by checkAuth_ from this point on. Missing/already-gone token is
+// treated as success (logging out is idempotent from the caller's view).
+function logout_(token) {
+  if (!token) return { loggedOut: true };
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === token) {
+      sh.deleteRow(i + 1);
+      break;
+    }
+  }
+  return { loggedOut: true };
+}
+
+// Salted, iterated SHA-256. Not a substitute for bcrypt/scrypt/argon2 on a
+// public product, but a reasonable lightweight KDF for a closed 2-user app
+// with no external dependencies available.
+function hashPassword_(password, salt) {
+  let bytes = Utilities.newBlob(String(password) + ":" + String(salt)).getBytes();
+  for (let i = 0; i < HASH_ITERATIONS; i++) {
+    bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);
+  }
+  return bytes.map(b => ("0" + (b & 0xFF).toString(16)).slice(-2)).join("");
+}
+
+// ------- SETUP (run this once per person, manually, from the Apps Script
+// editor — same pattern as initialize()). There is no public sign-up
+// endpoint: for a closed 2-person app, a public one would be a real hole. -------
+function createUser_(username, password, displayName) {
+  username = (username || "").trim();
+  if (!username || !password) {
+    throw new Error("createUser_ needs both a username and a password.");
+  }
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === username) {
+      throw new Error('User "' + username + '" already exists — delete that row from Users first if you want to recreate it.');
+    }
+  }
+  const salt = Utilities.getUuid();
+  const passwordHash = hashPassword_(password, salt);
+  sh.appendRow([username, passwordHash, salt, displayName || username, new Date().toISOString()]);
+  Logger.log('Created user "' + username + '".');
 }
 
 // ------- DATA WRITE: transactions -------

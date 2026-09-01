@@ -5,8 +5,14 @@ const CACHE_KEY = "ourbudget_cache_v1";
 // Bump this with every release, and add a matching entry to CHANGELOG below.
 // Also bump the CACHE_NAME in sw.js to the same value so Safari's standalone
 // app picks up the new files instead of serving a stale cached copy.
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const CHANGELOG = [
+  { version: "1.4.0", notes: [
+    "Replaced the shared passcode with individual login — each partner now has their own username and password",
+    "Logging in keeps you signed in indefinitely on that device (through app restarts and reopens) until you tap 'Log out' in Settings",
+    "Settings > Connection no longer has a passcode field; a new Settings > Account card shows who's logged in and lets you log out",
+    "Requires the matching Code.gs v1.1.0 update — see that file's changelog, and note the new one-time step of creating each person's account with createUser_()"
+  ]},
   { version: "1.3.0", notes: [
     "Dashboard now has Daily / Weekly / Monthly views — each shows income, expenses, and net for the period, with a day-by-day breakdown in Weekly and a week-by-week breakdown in Monthly (weeks run Monday–Sunday everywhere)",
     "The header and Balance card now show net (income − expenses), color-coded green when positive and red when negative, instead of expenses-only",
@@ -84,11 +90,13 @@ const CHANGELOG = [
   ]}
 ];
 
-// Pre-filled so the app works immediately without visiting Settings.
-// Anything saved in Settings later (e.g. a changed passcode) overrides these.
+// Pre-filled so the connection works immediately without visiting Settings.
+// Anything saved in Settings later (e.g. a changed deployment URL) overrides
+// this. Login is separate from this config: sessionToken / loggedInAsUsername
+// live in the same CFG_KEY blob (see getConfig/setConfig below) but have no
+// default here — there is no default account, only what login_() returns.
 const DEFAULT_CONFIG = {
   apiUrl: "https://script.google.com/macros/s/AKfycbxFREWx42-rLloMJApIVOEv0zlI5wz1VNcpYyaTJ0oaA9pqROt45wH9kAQ7PRq1MYX0/exec",
-  passcode: "022398",
   geminiKey: ""
 };
 
@@ -178,26 +186,45 @@ function optimisticDelete(key, id, action, label){
 }
 
 /* ---------------- API ---------------- */
+// True if `err` came from checkAuth_ rejecting the session (missing/invalid/
+// logged-out token), as opposed to a network failure or an ordinary backend
+// error. The "AUTH: " prefix is set by Code.gs's checkAuth_ specifically so
+// this check doesn't have to guess based on free-form error text.
+function isAuthError(err){
+  return !!(err && typeof err.message === 'string' && err.message.indexOf('AUTH:') === 0);
+}
+
 async function apiGet(action){
   const cfg = getConfig();
   if(!cfg.apiUrl) throw new Error("Not connected yet — go to Settings.");
-  const url = `${cfg.apiUrl}?action=${action}&passcode=${encodeURIComponent(cfg.passcode||"")}`;
+  const url = `${cfg.apiUrl}?action=${action}&token=${encodeURIComponent(cfg.sessionToken||"")}`;
   const res = await fetch(url);
   const json = await res.json();
   if(!json.ok) throw new Error(json.error || "Request failed");
   return json.data;
 }
+// Also used for the unauthenticated "login" action itself — cfg.sessionToken
+// is simply empty at that point, and Code.gs's doPost only checks a token for
+// every action other than "login", so sending an empty one is harmless.
 async function apiPost(action, payload){
   const cfg = getConfig();
   if(!cfg.apiUrl) throw new Error("Not connected yet — go to Settings.");
   const res = await fetch(cfg.apiUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, payload, passcode: cfg.passcode||"" })
+    body: JSON.stringify({ action, payload, token: cfg.sessionToken||"" })
   });
   const json = await res.json();
   if(!json.ok) throw new Error(json.error || "Request failed");
   return json.data;
+}
+
+// Clears the local session (does NOT call the backend — used when we've
+// already learned the token is dead, e.g. from an AUTH error, so there's
+// nothing valid left to revoke).
+function clearLocalSession(){
+  const cfg = getConfig();
+  setConfig({ ...cfg, sessionToken: '', loggedInAsUsername: '' });
 }
 
 // Refreshes CONFIRMED from the Sheet and recomputes. Because recompute()
@@ -213,6 +240,15 @@ async function loadAll(showToastOnFail, showSuccessToast){
     recompute();
     if(showSuccessToast) showToast('Refreshed ✓');
   }catch(err){
+    // A dead/stale/deleted token (e.g. logged out elsewhere, or the Sessions
+    // row was removed by hand) means we're not actually logged in anymore —
+    // no amount of retrying fixes that, so drop back to the Login screen
+    // instead of treating it as an ordinary offline blip.
+    if(isAuthError(err)){
+      clearLocalSession();
+      showLoginScreen('Session expired — please log in again.');
+      return;
+    }
     if(!confirmedLoadedOnce){
       const cached = getCache();
       if(cached){ CONFIRMED = cached; confirmedLoadedOnce = true; recompute(); }
@@ -1201,14 +1237,101 @@ document.getElementById('debtsList').addEventListener('click', (e)=>{
 /* ---------------- settings ---------------- */
 document.getElementById('saveConnBtn').addEventListener('click', async ()=>{
   const apiUrl = document.getElementById('sApiUrl').value.trim();
-  const passcode = document.getElementById('sPasscode').value.trim();
   if(!apiUrl){ showToast('Paste your Apps Script URL'); return; }
-  setConfig({...getConfig(), apiUrl, passcode});
+  setConfig({...getConfig(), apiUrl});
   showToast('Saved — connecting…');
   await loadAll();
 });
 document.getElementById('testConnBtn').addEventListener('click', async ()=>{
   try{ await apiGet('getAll'); showToast('Connected ✓'); } catch(err){ showToast('Failed: '+err.message); }
+});
+
+/* ---------------- account / login / logout ---------------- */
+// Reflects the currently logged-in user in Settings > Account. Called after
+// login, after logout, and once on init so a page reload shows the right
+// state immediately instead of a blank flash.
+function renderAccountSettings(){
+  const cfg = getConfig();
+  document.getElementById('accountUsernameLabel').textContent = cfg.loggedInAsUsername || '—';
+}
+
+function showLoginScreen(message){
+  document.getElementById('loginScreen').style.display = 'flex';
+  const errEl = document.getElementById('loginError');
+  if(message){ errEl.textContent = message; errEl.style.display = 'block'; }
+  else { errEl.style.display = 'none'; }
+}
+function hideLoginScreen(){
+  document.getElementById('loginScreen').style.display = 'none';
+}
+
+async function attemptLogin(){
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  if(!username || !password){
+    errEl.textContent = 'Enter your username and password.';
+    errEl.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('loginBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Logging in…';
+  try{
+    const data = await apiPost('login', { username, password });
+    setConfig({...getConfig(), sessionToken: data.token, loggedInAsUsername: data.username});
+    document.getElementById('loginPassword').value = '';
+    errEl.style.display = 'none';
+    renderAccountSettings();
+    hideLoginScreen();
+    await loadAll(true, false);
+    showToast(`Welcome back, ${data.displayName || data.username} ✓`);
+  }catch(err){
+    errEl.textContent = err.message || 'Login failed.';
+    errEl.style.display = 'block';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+document.getElementById('loginBtn').addEventListener('click', attemptLogin);
+document.getElementById('loginPassword').addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter') attemptLogin();
+});
+
+// Escape hatch for a broken/edited deployment URL while logged out — Settings
+// itself is behind the login gate, so without this a bad apiUrl would strand
+// the user with no way back in short of clearing local storage by hand.
+document.getElementById('toggleLoginConnBtn').addEventListener('click', ()=>{
+  const el = document.getElementById('loginConnFields');
+  const showing = el.style.display !== 'none';
+  if(!showing) document.getElementById('loginApiUrl').value = getConfig().apiUrl || '';
+  el.style.display = showing ? 'none' : 'block';
+});
+document.getElementById('loginSaveConnBtn').addEventListener('click', ()=>{
+  const apiUrl = document.getElementById('loginApiUrl').value.trim();
+  const errEl = document.getElementById('loginError');
+  if(!apiUrl){ errEl.textContent = 'Paste your Apps Script URL'; errEl.style.display = 'block'; return; }
+  setConfig({...getConfig(), apiUrl});
+  document.getElementById('sApiUrl').value = apiUrl; // keep Settings in sync for once logged in
+  errEl.textContent = 'Connection URL saved — try logging in again.';
+  errEl.style.display = 'block';
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async ()=>{
+  try{ await apiPost('logout', {}); } catch(err){ /* best-effort — clear locally regardless so the user isn't stuck */ }
+  clearLocalSession();
+  CONFIRMED = JSON.parse(JSON.stringify(EMPTY_STATE));
+  STATE = CONFIRMED;
+  pendingOps = [];
+  Object.keys(pendingCreateOpByTmpId).forEach(k => delete pendingCreateOpByTmpId[k]);
+  confirmedLoadedOnce = false;
+  localStorage.removeItem(CACHE_KEY);
+  document.getElementById('loginUsername').value = '';
+  renderAccountSettings();
+  recompute();
+  showLoginScreen();
 });
 document.getElementById('saveNamesBtn').addEventListener('click', ()=>{
   const partner1Name = document.getElementById('sP1Name').value;
@@ -1433,9 +1556,15 @@ document.getElementById('saveReceiptBtn').addEventListener('click', ()=>{
 });
 
 /* ---------------- auto refresh ---------------- */
+// Only meaningful once actually logged in — without a session every one of
+// these would just be a guaranteed AUTH failure hitting the backend for no
+// reason (loadAll's catch handles it safely either way, but there's no
+// reason to fire it while sitting on the Login screen).
+function canAutoRefresh(){ const cfg = getConfig(); return !!(cfg.apiUrl && cfg.sessionToken); }
+
 // Quietly re-sync with the Sheet every 30s while the app is open and visible.
 setInterval(()=>{
-  if(document.visibilityState === 'visible' && getConfig().apiUrl){
+  if(document.visibilityState === 'visible' && canAutoRefresh()){
     loadAll(false);
   }
 }, 30000);
@@ -1443,12 +1572,12 @@ setInterval(()=>{
 // Also refresh the moment the app comes back to the foreground
 // (switching apps, unlocking the phone, reopening from the home screen).
 document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState === 'visible' && getConfig().apiUrl){
+  if(document.visibilityState === 'visible' && canAutoRefresh()){
     loadAll(false);
   }
 });
 window.addEventListener('focus', ()=>{
-  if(getConfig().apiUrl) loadAll(false);
+  if(canAutoRefresh()) loadAll(false);
 });
 
 /* ---------------- pull-to-refresh ---------------- */
@@ -1465,6 +1594,7 @@ window.addEventListener('focus', ()=>{
 
   window.addEventListener('touchstart', (e)=>{
     if(refreshing) return;
+    if(!canAutoRefresh()) return; // nothing to refresh while logged out
     if(window.scrollY <= 0){
       startY = e.touches[0].clientY;
       pulling = true;
@@ -1505,16 +1635,20 @@ window.addEventListener('focus', ()=>{
 (function init(){
   const cfg = getConfig();
   if(cfg.apiUrl) document.getElementById('sApiUrl').value = cfg.apiUrl;
-  if(cfg.passcode) document.getElementById('sPasscode').value = cfg.passcode;
   if(cfg.geminiKey) document.getElementById('sGeminiKey').value = cfg.geminiKey;
+  renderAccountSettings();
 
   const cached = getCache();
   if(cached){ CONFIRMED = cached; confirmedLoadedOnce = true; recompute(); }
 
-  if(cfg.apiUrl){ loadAll(); }
-  else{
-    showToast('Set up your connection in Settings');
-    document.querySelector('nav.bottom button[data-screen="settings"]').click();
+  // The login screen — not Settings, not the Dashboard — is what gates the
+  // app now. A session token that turns out to be dead is caught by
+  // loadAll()'s isAuthError path, which drops back here on its own.
+  if(cfg.sessionToken){
+    hideLoginScreen();
+    loadAll();
+  } else {
+    showLoginScreen();
   }
 
   if('serviceWorker' in navigator){
