@@ -1402,6 +1402,26 @@ window.addEventListener('focus', ()=>{
   }
 
   if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    navigator.serviceWorker.register('sw.js').then((reg)=>{
+      // Standalone home-screen apps rarely re-check for a new service worker
+      // on their own, so a shipped fix can sit uninstalled indefinitely.
+      // Actively check on load and whenever the app is brought back to the
+      // foreground, so a new release is picked up promptly.
+      reg.update().catch(()=>{});
+      document.addEventListener('visibilitychange', ()=>{
+        if(document.visibilityState === 'visible') reg.update().catch(()=>{});
+      });
+    }).catch(()=>{});
+
+    // Once a newly-installed worker activates and takes control, this page
+    // is still running the OLD cached app shell (old HTML/CSS/JS already
+    // loaded into memory) — reload once so the new version is actually shown
+    // instead of silently staying stale until the next manual relaunch.
+    let swRefreshed = false;
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+      if(swRefreshed) return;
+      swRefreshed = true;
+      location.reload();
+    });
   }
 })();
