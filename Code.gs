@@ -12,7 +12,7 @@
  * (Deploy > Manage deployments > Edit > New version > Deploy).
  *
  * ============================================================
- * SCRIPT VERSION: 1.1.0
+ * SCRIPT VERSION: 1.2.0
  * ------------------------------------------------------------
  * This is this file's OWN version number — it only moves when
  * Code.gs itself changes (a new action, a new sheet/column, a
@@ -26,6 +26,32 @@
  * what changed in the backend.
  * ------------------------------------------------------------
  * CHANGELOG
+ *   v1.2.0 – Self-serve signup and email password reset, on top
+ *            of v1.1.0's login. Users gets a new "email" column
+ *            (migrated in for existing accounts, defaulting to
+ *            blank). New PasswordResets sheet (token, username,
+ *            createdAt, used) backs a short-lived, single-use
+ *            6-digit reset code — unlike session tokens, which
+ *            stay valid forever by design, reset codes expire in
+ *            RESET_CODE_EXPIRY_MINUTES because an unexpiring one
+ *            sitting in a Sheet would be a standing takeover key.
+ *            New unauthenticated actions: "signup" (rejects a
+ *            taken username/email, hashes the password the same
+ *            way login does, creates the account, and logs the
+ *            person straight in), "requestPasswordReset" (always
+ *            returns the same generic message regardless of
+ *            whether the email matched, so a response can't be
+ *            used to discover which addresses have accounts —
+ *            only emails a code if it did match), and
+ *            "resetPassword" (validates the code is unused and
+ *            unexpired, updates the password, and — deliberately
+ *            — invalidates every existing session for that user,
+ *            since a reset is exactly the moment a lost/stolen
+ *            device's permanent old session should stop working).
+ *            createUser_ now also accepts an email and looks up
+ *            columns by header name instead of fixed position, so
+ *            it and signup_ stay correct regardless of column
+ *            order.
  *   v1.1.0 – Replaced the single shared PASSCODE with per-person
  *            login. Added Users (username, passwordHash, salt,
  *            displayName, createdAt) and Sessions (token,
@@ -100,13 +126,19 @@ const SHEET_NAMES = {
   FUND: "FoodFund",
   DEBTS: "Debts",
   USERS: "Users",
-  SESSIONS: "Sessions"
+  SESSIONS: "Sessions",
+  PASSWORD_RESETS: "PasswordResets"
 };
 
 // Salted SHA-256, stretched with many iterations, as a lightweight KDF.
 // Apps Script has no bcrypt/scrypt/argon2 built in; this is reasonable for a
 // closed 2-user app but is NOT adequate for a public-facing product at scale.
 const HASH_ITERATIONS = 10000;
+
+// Reset codes are deliberately short-lived, unlike session tokens (which are
+// permanent by design). A code that never expired would be a standing
+// "reset anyone's password" key sitting in a Sheet.
+const RESET_CODE_EXPIRY_MINUTES = 45;
 
 // ------- SETUP (run this once manually from the Apps Script editor) -------
 function initialize() {
@@ -167,12 +199,15 @@ function initialize() {
   }
 
   // Added in SCRIPT VERSION 1.1.0 for per-person login. No default rows are
-  // seeded here on purpose — there's no public sign-up, so accounts are
-  // created once per person via createUser_() run manually from the editor.
+  // seeded here on purpose — signup_ / createUser_ are what create accounts.
   const users = getOrCreateSheet_(ss, SHEET_NAMES.USERS);
   if (users.getLastRow() === 0) {
-    users.appendRow(["username", "passwordHash", "salt", "displayName", "createdAt"]);
+    users.appendRow(["username", "passwordHash", "salt", "displayName", "createdAt", "email"]);
   }
+  // Added in v1.2.0 for self-serve password reset; backfills existing
+  // accounts (created before "email" existed) with a blank value rather
+  // than failing the migration.
+  migrateAddColumn_(users, "email", "");
 
   // No expiry column — sessions are persistent until explicit logout, per
   // this app's requirements. Rows here ARE the source of truth checkAuth_
@@ -182,9 +217,15 @@ function initialize() {
     sessions.appendRow(["token", "username", "createdAt"]);
   }
 
+  // Added in v1.2.0. Short-lived, single-use codes — see resetPassword_.
+  const passwordResets = getOrCreateSheet_(ss, SHEET_NAMES.PASSWORD_RESETS);
+  if (passwordResets.getLastRow() === 0) {
+    passwordResets.appendRow(["token", "username", "createdAt", "used"]);
+  }
+
   SpreadsheetApp.flush();
   Logger.log("Initialized. Tabs: " + Object.values(SHEET_NAMES).join(", "));
-  Logger.log("Next: create your two accounts by running createUser_('username','password','Display Name') once each from this editor.");
+  Logger.log("Accounts can now be created either via the app's own sign-up screen, or manually with createUser_('username','password','Display Name','email@example.com') from this editor.");
 }
 
 function getOrCreateSheet_(ss, name) {
@@ -252,11 +293,21 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
 
-    // "login" is the one action allowed without a valid session — it's how
-    // you get one. Every other action still goes through checkAuth_ below,
-    // unchanged from how the old shared-passcode check worked.
+    // "login", "signup", "requestPasswordReset", and "resetPassword" are the
+    // only actions allowed without a valid session — everything else still
+    // goes through checkAuth_ below, unchanged from how the old
+    // shared-passcode check worked.
     if (body.action === "login") {
       return jsonOut_({ ok: true, data: login_(body.payload) });
+    }
+    if (body.action === "signup") {
+      return jsonOut_({ ok: true, data: signup_(body.payload) });
+    }
+    if (body.action === "requestPasswordReset") {
+      return jsonOut_({ ok: true, data: requestPasswordReset_(body.payload) });
+    }
+    if (body.action === "resetPassword") {
+      return jsonOut_({ ok: true, data: resetPassword_(body.payload) });
     }
 
     checkAuth_(body.token);
@@ -419,6 +470,101 @@ function rowToObj_(header, row) {
 
 // ------- AUTH: login / logout / accounts -------
 
+// ------- SETUP (run this once per person, manually, from the Apps Script
+// editor — same pattern as initialize()). Not the only way to create an
+// account anymore (see signup_ below), but still useful for seeding an
+// account without going through the app, or without email deliverability
+// being set up yet. Column positions are looked up by header name so this
+// stays correct regardless of where "email" ended up after migration. -------
+function createUser_(username, password, displayName, email) {
+  username = (username || "").trim();
+  if (!username || !password) {
+    throw new Error("createUser_ needs both a username and a password.");
+  }
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = sh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const col = {
+    username: header.indexOf("username"),
+    passwordHash: header.indexOf("passwordHash"),
+    salt: header.indexOf("salt"),
+    displayName: header.indexOf("displayName"),
+    createdAt: header.indexOf("createdAt"),
+    email: header.indexOf("email")
+  };
+  const usernameLower = username.toLowerCase();
+  if (rows.some(r => String(r[col.username]).toLowerCase() === usernameLower)) {
+    throw new Error('User "' + username + '" already exists — delete that row from Users first if you want to recreate it.');
+  }
+  const salt = Utilities.getUuid();
+  const passwordHash = hashPassword_(password, salt);
+  const newRow = [];
+  newRow[col.username] = username;
+  newRow[col.passwordHash] = passwordHash;
+  newRow[col.salt] = salt;
+  newRow[col.displayName] = displayName || username;
+  newRow[col.createdAt] = new Date().toISOString();
+  if (col.email !== -1) newRow[col.email] = email || "";
+  sh.appendRow(newRow);
+  Logger.log('Created user "' + username + '".');
+}
+
+// Self-serve equivalent of createUser_, callable from the app itself. Same
+// hashing approach as login_/createUser_. Rejects a taken username or email
+// (case-insensitively — Sheets has no native unique constraint, so this scan
+// IS the uniqueness enforcement) and logs the new user straight in, same as
+// login_ would.
+function signup_(payload) {
+  const username = ((payload && payload.username) || "").trim();
+  const email = ((payload && payload.email) || "").trim();
+  const password = (payload && payload.password) || "";
+  if (!username || !email || !password) {
+    throw new Error("Username, email, and password are all required.");
+  }
+
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = sh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const col = {
+    username: header.indexOf("username"),
+    email: header.indexOf("email"),
+    passwordHash: header.indexOf("passwordHash"),
+    salt: header.indexOf("salt"),
+    displayName: header.indexOf("displayName"),
+    createdAt: header.indexOf("createdAt")
+  };
+
+  const usernameLower = username.toLowerCase();
+  const emailLower = email.toLowerCase();
+  if (rows.some(r => String(r[col.username]).toLowerCase() === usernameLower)) {
+    throw new Error("That username is already taken.");
+  }
+  // A blank stored email (accounts created before v1.2.0, or via
+  // createUser_ without one) must never count as a match against a blank
+  // signup email — otherwise the first no-email legacy account would block
+  // everyone else from signing up.
+  if (emailLower && rows.some(r => String(r[col.email]).toLowerCase() === emailLower)) {
+    throw new Error("An account with that email already exists.");
+  }
+
+  const salt = Utilities.getUuid();
+  const passwordHash = hashPassword_(password, salt);
+  const newRow = [];
+  newRow[col.username] = username;
+  newRow[col.email] = email;
+  newRow[col.passwordHash] = passwordHash;
+  newRow[col.salt] = salt;
+  newRow[col.displayName] = username;
+  newRow[col.createdAt] = new Date().toISOString();
+  sh.appendRow(newRow);
+
+  const sessionsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const token = Utilities.getUuid();
+  sessionsSh.appendRow([token, username, new Date().toISOString()]);
+
+  return { token, username, displayName: username };
+}
+
 // Verifies username + password and, on match, creates and returns a new
 // session token. Deliberately returns the same generic error whether the
 // username doesn't exist or the password is wrong, so a failed attempt can't
@@ -468,6 +614,117 @@ function logout_(token) {
   return { loggedOut: true };
 }
 
+// Deletes every Sessions row for a given username. Used after a password
+// reset so a lost/stolen device's permanent old session stops working the
+// moment the real owner regains control of the account — intentional, even
+// though normal login sessions are otherwise permanent by design.
+function invalidateAllSessionsForUser_(username) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const values = sh.getDataRange().getValues();
+  // Walk bottom-up so deleting a row doesn't shift the index of rows still
+  // waiting to be checked.
+  for (let i = values.length - 1; i >= 1; i--) {
+    if (values[i][1] === username) sh.deleteRow(i + 1);
+  }
+}
+
+function generateResetCode_() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// Always returns the same generic message whether or not the email matched
+// an account — a different response for "sent" vs "no such account" is
+// exactly how an attacker enumerates which emails have accounts, so the
+// caller can't be allowed to tell those two cases apart.
+function requestPasswordReset_(payload) {
+  const email = ((payload && payload.email) || "").trim();
+  const genericResult = { message: "If that email is registered, a reset code has been sent." };
+  if (!email) return genericResult;
+
+  const usersSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = usersSh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const col = { username: header.indexOf("username"), email: header.indexOf("email") };
+  const emailLower = email.toLowerCase();
+  const row = emailLower ? rows.find(r => String(r[col.email]).toLowerCase() === emailLower) : null;
+  if (!row) return genericResult;
+
+  const username = row[col.username];
+  const code = generateResetCode_();
+  const resetsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.PASSWORD_RESETS);
+  resetsSh.appendRow([code, username, new Date().toISOString(), false]);
+
+  sendResetEmail_(email, code);
+  return genericResult;
+}
+
+function sendResetEmail_(email, code) {
+  MailApp.sendEmail({
+    to: email,
+    subject: "Your Our Budget password reset code",
+    body:
+      "Your password reset code is: " + code + "\n\n" +
+      "This code expires in " + RESET_CODE_EXPIRY_MINUTES + " minutes and can only be used once.\n\n" +
+      "If you didn't request this, you can safely ignore this email."
+  });
+}
+
+// Validates the code (unused, unexpired), updates the password with a fresh
+// salt, marks the code used so it can't be replayed, and invalidates every
+// existing session for that user.
+function resetPassword_(payload) {
+  const code = ((payload && payload.token) || "").trim();
+  const newPassword = (payload && payload.newPassword) || "";
+  const genericError = "That reset code is invalid or has expired.";
+  if (!code || !newPassword) throw new Error(genericError);
+
+  const resetsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.PASSWORD_RESETS);
+  const resetValues = resetsSh.getDataRange().getValues();
+  const [resetHeader, ...resetRows] = resetValues;
+  const rCol = {
+    token: resetHeader.indexOf("token"),
+    username: resetHeader.indexOf("username"),
+    createdAt: resetHeader.indexOf("createdAt"),
+    used: resetHeader.indexOf("used")
+  };
+
+  const matchIndex = resetRows.findIndex(r => String(r[rCol.token]) === code);
+  if (matchIndex === -1) throw new Error(genericError);
+
+  const match = resetRows[matchIndex];
+  const alreadyUsed = match[rCol.used] === true || String(match[rCol.used]).toUpperCase() === "TRUE";
+  if (alreadyUsed) throw new Error(genericError);
+
+  const ageMinutes = (Date.now() - new Date(match[rCol.createdAt]).getTime()) / 60000;
+  if (!(ageMinutes >= 0) || ageMinutes > RESET_CODE_EXPIRY_MINUTES) throw new Error(genericError);
+
+  const username = match[rCol.username];
+
+  const usersSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const userValues = usersSh.getDataRange().getValues();
+  const [userHeader, ...userRows] = userValues;
+  const uCol = {
+    username: userHeader.indexOf("username"),
+    passwordHash: userHeader.indexOf("passwordHash"),
+    salt: userHeader.indexOf("salt")
+  };
+  const userRowIndex = userRows.findIndex(r => r[uCol.username] === username);
+  if (userRowIndex === -1) throw new Error(genericError); // account was deleted after the code was issued
+
+  const newSalt = Utilities.getUuid();
+  const newHash = hashPassword_(newPassword, newSalt);
+  const userSheetRow = userRowIndex + 2; // +1 for the header row, +1 to 1-index
+  usersSh.getRange(userSheetRow, uCol.passwordHash + 1).setValue(newHash);
+  usersSh.getRange(userSheetRow, uCol.salt + 1).setValue(newSalt);
+
+  // Mark the code used before anything else can race to reuse it.
+  resetsSh.getRange(matchIndex + 2, rCol.used + 1).setValue(true);
+
+  invalidateAllSessionsForUser_(username);
+
+  return { reset: true };
+}
+
 // Salted, iterated SHA-256. Not a substitute for bcrypt/scrypt/argon2 on a
 // public product, but a reasonable lightweight KDF for a closed 2-user app
 // with no external dependencies available.
@@ -477,27 +734,6 @@ function hashPassword_(password, salt) {
     bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);
   }
   return bytes.map(b => ("0" + (b & 0xFF).toString(16)).slice(-2)).join("");
-}
-
-// ------- SETUP (run this once per person, manually, from the Apps Script
-// editor — same pattern as initialize()). There is no public sign-up
-// endpoint: for a closed 2-person app, a public one would be a real hole. -------
-function createUser_(username, password, displayName) {
-  username = (username || "").trim();
-  if (!username || !password) {
-    throw new Error("createUser_ needs both a username and a password.");
-  }
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
-  const values = sh.getDataRange().getValues();
-  for (let i = 1; i < values.length; i++) {
-    if (values[i][0] === username) {
-      throw new Error('User "' + username + '" already exists — delete that row from Users first if you want to recreate it.');
-    }
-  }
-  const salt = Utilities.getUuid();
-  const passwordHash = hashPassword_(password, salt);
-  sh.appendRow([username, passwordHash, salt, displayName || username, new Date().toISOString()]);
-  Logger.log('Created user "' + username + '".');
 }
 
 // ------- DATA WRITE: transactions -------

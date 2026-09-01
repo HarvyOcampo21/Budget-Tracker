@@ -40,12 +40,89 @@
 
     <button class="primary" id="loginBtn">Log in</button>
 
+    <div style="display:flex;justify-content:space-between;gap:12px;margin-top:16px">
+      <button class="link" id="goToSignupBtn">Create account</button>
+      <button class="link" id="goToForgotBtn">Forgot password?</button>
+    </div>
+
     <button class="link" id="toggleLoginConnBtn" style="margin-top:18px">Connection settings</button>
     <div id="loginConnFields" style="display:none;margin-top:10px">
       <label style="margin-top:0">Apps Script Web App URL</label>
       <input type="text" id="loginApiUrl" placeholder="https://script.google.com/macros/s/.../exec">
       <button class="ghost" id="loginSaveConnBtn">Save URL</button>
     </div>
+  </div>
+</div>
+
+<!-- CREATE ACCOUNT -->
+<div class="login-screen" id="signupScreen" style="display:none">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="eyebrow">Our Budget</div>
+      <h1>Create your account</h1>
+    </div>
+
+    <label style="margin-top:0">Username</label>
+    <input type="text" id="signupUsername" placeholder="Choose a username" autocomplete="username">
+
+    <label>Email</label>
+    <input type="email" id="signupEmail" placeholder="you@example.com" autocomplete="email">
+
+    <label>Password</label>
+    <input type="password" id="signupPassword" placeholder="Choose a password" autocomplete="new-password">
+
+    <label>Confirm password</label>
+    <input type="password" id="signupConfirmPassword" placeholder="Type it again" autocomplete="new-password">
+
+    <div class="login-error" id="signupError" style="display:none"></div>
+
+    <button class="primary" id="signupBtn">Create account</button>
+    <button class="link" id="backToLoginFromSignupBtn" style="margin-top:18px">Back to log in</button>
+  </div>
+</div>
+
+<!-- FORGOT PASSWORD -->
+<div class="login-screen" id="forgotScreen" style="display:none">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="eyebrow">Our Budget</div>
+      <h1>Reset your password</h1>
+    </div>
+    <div class="balance-sub" style="margin-bottom:14px">Enter your account email and we'll send a 6-digit reset code.</div>
+
+    <label style="margin-top:0">Email</label>
+    <input type="email" id="forgotEmail" placeholder="you@example.com" autocomplete="email">
+
+    <div class="login-error" id="forgotError" style="display:none"></div>
+
+    <button class="primary" id="sendResetCodeBtn">Send reset code</button>
+    <button class="link" id="backToLoginFromForgotBtn" style="margin-top:18px">Back to log in</button>
+  </div>
+</div>
+
+<!-- RESET PASSWORD (enter code + new password) -->
+<div class="login-screen" id="resetScreen" style="display:none">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="eyebrow">Our Budget</div>
+      <h1>Enter your reset code</h1>
+    </div>
+    <div class="balance-sub" style="margin-bottom:14px" id="resetSentToLabel">We emailed you a 6-digit code.</div>
+
+    <label style="margin-top:0">Reset code</label>
+    <input type="text" inputmode="numeric" id="resetCode" placeholder="123456" maxlength="6" autocomplete="one-time-code">
+
+    <label>New password</label>
+    <input type="password" id="resetNewPassword" placeholder="Choose a new password" autocomplete="new-password">
+
+    <label>Confirm new password</label>
+    <input type="password" id="resetConfirmPassword" placeholder="Type it again" autocomplete="new-password">
+
+    <div class="login-error" id="resetError" style="display:none"></div>
+
+    <button class="primary" id="resetPasswordBtn">Reset password</button>
+    <button class="link" id="resendResetCodeBtn" style="margin-top:14px">Resend code</button>
+    <button class="link" id="backToLoginFromResetBtn" style="margin-top:8px">Back to log in</button>
   </div>
 </div>
 

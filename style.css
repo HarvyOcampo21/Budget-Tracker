@@ -269,3 +269,7 @@
     background:var(--coral-soft); color:var(--coral); border-radius:10px; padding:10px 12px;
     font-size:13px; font-weight:600; margin-top:14px; line-height:1.4;
   }
+  /* Same box, reused for non-error confirmations (e.g. "code sent",
+     "password reset — log in again") so we don't invent a second component
+     just to change the color. */
+  .login-error.info{ background:var(--seafoam-soft); color:var(--seafoam); }

@@ -5,8 +5,14 @@ const CACHE_KEY = "ourbudget_cache_v1";
 // Bump this with every release, and add a matching entry to CHANGELOG below.
 // Also bump the CACHE_NAME in sw.js to the same value so Safari's standalone
 // app picks up the new files instead of serving a stale cached copy.
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const CHANGELOG = [
+  { version: "1.5.0", notes: [
+    "Added self-serve account creation — 'Create account' on the Login screen",
+    "Added 'Forgot password?' on the Login screen: emails a 6-digit code, then lets you set a new password",
+    "Resetting your password logs out every other device using that account, so a lost/stolen phone stops working the moment you reset",
+    "Requires the matching Code.gs v1.2.0 update — see that file's changelog"
+  ]},
   { version: "1.4.0", notes: [
     "Replaced the shared passcode with individual login — each partner now has their own username and password",
     "Logging in keeps you signed in indefinitely on that device (through app restarts and reopens) until you tap 'Log out' in Settings",
@@ -1256,13 +1262,28 @@ function renderAccountSettings(){
 }
 
 function showLoginScreen(message){
-  document.getElementById('loginScreen').style.display = 'flex';
-  const errEl = document.getElementById('loginError');
-  if(message){ errEl.textContent = message; errEl.style.display = 'block'; }
-  else { errEl.style.display = 'none'; }
+  showAuthScreen('loginScreen', message);
 }
-function hideLoginScreen(){
-  document.getElementById('loginScreen').style.display = 'none';
+// Hides all four auth overlays (login, signup, forgot, reset). "Logged in"
+// just means none of these are showing, so #app underneath is reachable.
+function hideAuthScreens(){
+  ['loginScreen','signupScreen','forgotScreen','resetScreen'].forEach(id=>{
+    document.getElementById(id).style.display = 'none';
+  });
+}
+// Switches which single auth overlay is visible. `isInfo` styles the message
+// as a confirmation (green) instead of an error (red) — same box, reused for
+// both, so e.g. "we sent your code" and "wrong code" don't need two widgets.
+function showAuthScreen(screenId, message, isInfo){
+  hideAuthScreens();
+  document.getElementById(screenId).style.display = 'flex';
+  const errorIdByScreen = { loginScreen:'loginError', signupScreen:'signupError', forgotScreen:'forgotError', resetScreen:'resetError' };
+  const errEl = document.getElementById(errorIdByScreen[screenId]);
+  if(errEl){
+    errEl.classList.toggle('info', !!isInfo);
+    if(message){ errEl.textContent = message; errEl.style.display = 'block'; }
+    else { errEl.style.display = 'none'; }
+  }
 }
 
 async function attemptLogin(){
@@ -1270,6 +1291,7 @@ async function attemptLogin(){
   const password = document.getElementById('loginPassword').value;
   const errEl = document.getElementById('loginError');
   if(!username || !password){
+    errEl.classList.remove('info');
     errEl.textContent = 'Enter your username and password.';
     errEl.style.display = 'block';
     return;
@@ -1284,10 +1306,11 @@ async function attemptLogin(){
     document.getElementById('loginPassword').value = '';
     errEl.style.display = 'none';
     renderAccountSettings();
-    hideLoginScreen();
+    hideAuthScreens();
     await loadAll(true, false);
     showToast(`Welcome back, ${data.displayName || data.username} ✓`);
   }catch(err){
+    errEl.classList.remove('info');
     errEl.textContent = err.message || 'Login failed.';
     errEl.style.display = 'block';
   }finally{
@@ -1312,11 +1335,148 @@ document.getElementById('toggleLoginConnBtn').addEventListener('click', ()=>{
 document.getElementById('loginSaveConnBtn').addEventListener('click', ()=>{
   const apiUrl = document.getElementById('loginApiUrl').value.trim();
   const errEl = document.getElementById('loginError');
-  if(!apiUrl){ errEl.textContent = 'Paste your Apps Script URL'; errEl.style.display = 'block'; return; }
+  if(!apiUrl){
+    errEl.classList.remove('info');
+    errEl.textContent = 'Paste your Apps Script URL';
+    errEl.style.display = 'block';
+    return;
+  }
   setConfig({...getConfig(), apiUrl});
   document.getElementById('sApiUrl').value = apiUrl; // keep Settings in sync for once logged in
+  errEl.classList.add('info');
   errEl.textContent = 'Connection URL saved — try logging in again.';
   errEl.style.display = 'block';
+});
+
+/* ---------------- create account ---------------- */
+document.getElementById('goToSignupBtn').addEventListener('click', ()=> showAuthScreen('signupScreen'));
+document.getElementById('backToLoginFromSignupBtn').addEventListener('click', ()=> showAuthScreen('loginScreen'));
+
+async function attemptSignup(){
+  const username = document.getElementById('signupUsername').value.trim();
+  const email = document.getElementById('signupEmail').value.trim();
+  const password = document.getElementById('signupPassword').value;
+  const confirmPassword = document.getElementById('signupConfirmPassword').value;
+  const errEl = document.getElementById('signupError');
+  if(!username || !email || !password){
+    errEl.textContent = 'Fill in a username, email, and password.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if(password !== confirmPassword){
+    errEl.textContent = "Passwords don't match.";
+    errEl.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('signupBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Creating account…';
+  try{
+    const data = await apiPost('signup', { username, email, password });
+    setConfig({...getConfig(), sessionToken: data.token, loggedInAsUsername: data.username});
+    document.getElementById('signupPassword').value = '';
+    document.getElementById('signupConfirmPassword').value = '';
+    errEl.style.display = 'none';
+    renderAccountSettings();
+    hideAuthScreens();
+    await loadAll(true, false);
+    showToast(`Account created — welcome, ${data.displayName || data.username} ✓`);
+  }catch(err){
+    errEl.textContent = err.message || 'Could not create account.';
+    errEl.style.display = 'block';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+document.getElementById('signupBtn').addEventListener('click', attemptSignup);
+
+/* ---------------- forgot / reset password ---------------- */
+document.getElementById('goToForgotBtn').addEventListener('click', ()=> showAuthScreen('forgotScreen'));
+document.getElementById('backToLoginFromForgotBtn').addEventListener('click', ()=> showAuthScreen('loginScreen'));
+document.getElementById('backToLoginFromResetBtn').addEventListener('click', ()=> showAuthScreen('loginScreen'));
+
+// Remembered only so "Resend code" doesn't require retyping the email —
+// never sent anywhere except back to the same requestPasswordReset call.
+let pendingResetEmail = '';
+
+async function requestReset(email){
+  const errEl = document.getElementById('forgotError');
+  const btn = document.getElementById('sendResetCodeBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try{
+    // Backend always returns the same generic message whether or not the
+    // email matched an account — don't try to branch on the response here,
+    // that would defeat the point.
+    await apiPost('requestPasswordReset', { email });
+    pendingResetEmail = email;
+    document.getElementById('resetSentToLabel').textContent = `If ${email} has an account, we've sent it a 6-digit code.`;
+    document.getElementById('resetCode').value = '';
+    document.getElementById('resetNewPassword').value = '';
+    document.getElementById('resetConfirmPassword').value = '';
+    showAuthScreen('resetScreen');
+  }catch(err){
+    errEl.textContent = err.message || 'Could not send reset code.';
+    errEl.style.display = 'block';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+document.getElementById('sendResetCodeBtn').addEventListener('click', ()=>{
+  const email = document.getElementById('forgotEmail').value.trim();
+  const errEl = document.getElementById('forgotError');
+  if(!email){ errEl.textContent = 'Enter your account email.'; errEl.style.display = 'block'; return; }
+  requestReset(email);
+});
+
+document.getElementById('resendResetCodeBtn').addEventListener('click', ()=>{
+  const errEl = document.getElementById('resetError');
+  if(!pendingResetEmail){
+    errEl.textContent = 'Go back and enter your email again.';
+    errEl.style.display = 'block';
+    return;
+  }
+  requestReset(pendingResetEmail);
+});
+
+document.getElementById('resetPasswordBtn').addEventListener('click', async ()=>{
+  const code = document.getElementById('resetCode').value.trim();
+  const newPassword = document.getElementById('resetNewPassword').value;
+  const confirmPassword = document.getElementById('resetConfirmPassword').value;
+  const errEl = document.getElementById('resetError');
+  if(!code || !newPassword){
+    errEl.textContent = 'Enter the code and a new password.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if(newPassword !== confirmPassword){
+    errEl.textContent = "Passwords don't match.";
+    errEl.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('resetPasswordBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Resetting…';
+  try{
+    await apiPost('resetPassword', { token: code, newPassword });
+    document.getElementById('resetCode').value = '';
+    document.getElementById('resetNewPassword').value = '';
+    document.getElementById('resetConfirmPassword').value = '';
+    pendingResetEmail = '';
+    showAuthScreen('loginScreen', 'Password reset — log in with your new password.', true);
+  }catch(err){
+    errEl.textContent = err.message || 'Could not reset password.';
+    errEl.style.display = 'block';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 });
 
 document.getElementById('logoutBtn').addEventListener('click', async ()=>{
@@ -1645,7 +1805,7 @@ window.addEventListener('focus', ()=>{
   // app now. A session token that turns out to be dead is caught by
   // loadAll()'s isAuthError path, which drops back here on its own.
   if(cfg.sessionToken){
-    hideLoginScreen();
+    hideAuthScreens();
     loadAll();
   } else {
     showLoginScreen();
