@@ -5,8 +5,13 @@ const CACHE_KEY = "ourbudget_cache_v1";
 // Bump this with every release, and add a matching entry to CHANGELOG below.
 // Also bump the CACHE_NAME in sw.js to the same value so Safari's standalone
 // app picks up the new files instead of serving a stale cached copy.
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const CHANGELOG = [
+  { version: "1.6.0", notes: [
+    "Removed the manual Partner 1/2 name fields from Settings — the two partner names shown everywhere now come from each person's account instead",
+    "Sign-up is now capped at 2 accounts, since the app's whole model (dashboard split, IOUs, personal spending) assumes exactly two people",
+    "Requires the matching Code.gs v1.3.0 update — see that file's changelog"
+  ]},
   { version: "1.5.0", notes: [
     "Added self-serve account creation — 'Create account' on the Login screen",
     "Added 'Forgot password?' on the Login screen: emails a 6-digit code, then lets you set a new password",
@@ -115,7 +120,7 @@ function setConfig(c){ localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
 function getCache(){ try{ return JSON.parse(localStorage.getItem(CACHE_KEY)) || null; }catch(e){ return null; } }
 function setCache(d){ localStorage.setItem(CACHE_KEY, JSON.stringify(d)); }
 
-const EMPTY_STATE = { transactions: [], categories: [], goals: [], settings: {}, foodFund: {balance:0, entries:[]}, debts: [] };
+const EMPTY_STATE = { transactions: [], categories: [], goals: [], settings: {}, foodFund: {balance:0, entries:[]}, debts: [], users: [] };
 // CONFIRMED holds the last state we know the backend actually has (from a full
 // getAll fetch, or patched in directly the moment a mutation is confirmed).
 // STATE is what's rendered: CONFIRMED with every still-pending optimistic
@@ -317,7 +322,16 @@ function optimisticAddTransaction(payload, label){
 function fmt(n){ const v = Number(n||0); return v.toLocaleString('en-AE', {minimumFractionDigits:0, maximumFractionDigits:0}); }
 function currentMonthKey(){ const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
 function showToast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2600); }
-function names(){ const s = STATE.settings||{}; return { p1: s.partner1Name||"Partner 1", p2: s.partner2Name||"Partner 2" }; }
+// p1/p2 come from the two Users accounts (in the order they were created —
+// Users is capped at 2 rows by signup_, so this is always well-defined once
+// both partners exist), not from any manually-typed setting. Falls back to
+// placeholder labels for a slot that doesn't have an account yet.
+function names(){
+  const users = STATE.users || [];
+  const p1 = (users[0] && (users[0].displayName || users[0].username)) || "Partner 1";
+  const p2 = (users[1] && (users[1].displayName || users[1].username)) || "Partner 2";
+  return { p1, p2 };
+}
 
 // Which month the Budgets/Personal screens are currently showing, and the
 // fallback granularity for the Dashboard. Defaults to the current month; the
@@ -633,9 +647,6 @@ function render(){
   fillSelect('fundSpendBy', [p1, p2]);
   fillSelect('debtFrom', [p1, p2]);
   fillSelect('debtTo', [p1, p2]);
-
-  if(!document.activeElement || document.activeElement.id !== 'sP1Name') document.getElementById('sP1Name').value = p1;
-  if(!document.activeElement || document.activeElement.id !== 'sP2Name') document.getElementById('sP2Name').value = p2;
 }
 
 // Rebuilds a <select>'s options while keeping whatever the user had chosen,
@@ -1492,16 +1503,6 @@ document.getElementById('logoutBtn').addEventListener('click', async ()=>{
   renderAccountSettings();
   recompute();
   showLoginScreen();
-});
-document.getElementById('saveNamesBtn').addEventListener('click', ()=>{
-  const partner1Name = document.getElementById('sP1Name').value;
-  const partner2Name = document.getElementById('sP2Name').value;
-  runOptimistic({
-    patch: (s)=>{ s.settings = {...(s.settings||{}), partner1Name, partner2Name}; return s; },
-    apiCall: () => apiPost('updateSettings', { partner1Name, partner2Name }),
-    label: 'Update names'
-  });
-  showToast('Names updated ✓');
 });
 document.getElementById('saveGeminiBtn').addEventListener('click', ()=>{
   const key = document.getElementById('sGeminiKey').value.trim();

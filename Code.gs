@@ -12,7 +12,7 @@
  * (Deploy > Manage deployments > Edit > New version > Deploy).
  *
  * ============================================================
- * SCRIPT VERSION: 1.2.0
+ * SCRIPT VERSION: 1.3.0
  * ------------------------------------------------------------
  * This is this file's OWN version number — it only moves when
  * Code.gs itself changes (a new action, a new sheet/column, a
@@ -26,6 +26,22 @@
  * what changed in the backend.
  * ------------------------------------------------------------
  * CHANGELOG
+ *   v1.3.0 – Partner display names now come from Users.displayName
+ *            instead of the manually-typed partner1Name/partner2Name
+ *            Settings keys, which are no longer seeded (existing
+ *            rows on already-deployed Sheets are left alone —
+ *            harmless, just unused). getAllData_ now also returns
+ *            a "users" list (username + displayName only — never
+ *            passwordHash/salt/email) so the frontend can derive
+ *            p1/p2 from real accounts. signup_ is now capped at 2
+ *            accounts: this app's whole accounting model (names(),
+ *            p1/p2, binary debt fromWho/toWho, dashboard
+ *            breakdowns) assumes exactly two people, so a 3rd
+ *            account would put every one of those into undefined
+ *            territory. The cap is what makes deriving p1/p2 from
+ *            Users safe in the first place — signup rejects a 3rd
+ *            signup with a generic "sign-up is closed" message and
+ *            creates nothing.
  *   v1.2.0 – Self-serve signup and email password reset, on top
  *            of v1.1.0's login. Users gets a new "email" column
  *            (migrated in for existing accounts, defaulting to
@@ -178,8 +194,6 @@ function initialize() {
   if (settings.getLastRow() === 0) {
     settings.appendRow(["key", "value"]);
     settings.appendRow(["currency", "AED"]);
-    settings.appendRow(["partner1Name", "Partner 1"]);
-    settings.appendRow(["partner2Name", "Partner 2"]);
     settings.appendRow(["personalBudgetP1", 0]);
     settings.appendRow(["personalBudgetP2", 0]);
   } else {
@@ -187,6 +201,10 @@ function initialize() {
     ensureSettingKey_(settings, "personalBudgetP1", 0);
     ensureSettingKey_(settings, "personalBudgetP2", 0);
   }
+  // partner1Name/partner2Name are no longer seeded as of v1.3.0 — display
+  // names now come from Users.displayName. Any partner1Name/partner2Name
+  // rows already sitting in an existing Settings sheet are left in place
+  // untouched; they're simply unused from here on, not deleted.
 
   const fund = getOrCreateSheet_(ss, SHEET_NAMES.FUND);
   if (fund.getLastRow() === 0) {
@@ -396,7 +414,8 @@ function getAllData_() {
     goals: getGoals_(),
     settings: getSettings_(),
     foodFund: getFoodFund_(),
-    debts: getDebts_()
+    debts: getDebts_(),
+    users: getUsers_()
   };
 }
 
@@ -427,6 +446,19 @@ function getSettings_() {
   const obj = {};
   values.forEach(([k, v]) => { if (k && k !== "key") obj[k] = v; });
   return obj;
+}
+
+// Deliberately returns only username + displayName — this goes to the
+// authenticated frontend so it can show partner names, and must never leak
+// passwordHash/salt/email even though those live in the same sheet/row.
+function getUsers_() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const values = sh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const col = { username: header.indexOf("username"), displayName: header.indexOf("displayName") };
+  return rows
+    .filter(r => r[col.username] !== "")
+    .map(r => ({ username: r[col.username], displayName: r[col.displayName] || r[col.username] }));
 }
 
 function getFoodFund_() {
@@ -533,6 +565,16 @@ function signup_(payload) {
     displayName: header.indexOf("displayName"),
     createdAt: header.indexOf("createdAt")
   };
+
+  // This app's whole accounting model (names(), p1/p2, binary debt
+  // fromWho/toWho, dashboard breakdowns) assumes exactly two people — a 3rd
+  // account would leave every one of those in undefined territory. No
+  // enumeration risk in saying the cap was hit, so this one doesn't need a
+  // generic wrapper the way the login/reset errors do.
+  const existingUserCount = rows.filter(r => r[col.username] !== "").length;
+  if (existingUserCount >= 2) {
+    throw new Error("Sign-up is closed — this app is limited to 2 accounts.");
+  }
 
   const usernameLower = username.toLowerCase();
   const emailLower = email.toLowerCase();
