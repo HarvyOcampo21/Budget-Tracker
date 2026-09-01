@@ -5,8 +5,14 @@ const CACHE_KEY = "ourbudget_cache_v1";
 // Bump this with every release, and add a matching entry to CHANGELOG below.
 // Also bump the CACHE_NAME in sw.js to the same value so Safari's standalone
 // app picks up the new files instead of serving a stale cached copy.
-const APP_VERSION = "1.2.5";
+const APP_VERSION = "1.3.0";
 const CHANGELOG = [
+  { version: "1.3.0", notes: [
+    "Dashboard now has Daily / Weekly / Monthly views — each shows income, expenses, and net for the period, with a day-by-day breakdown in Weekly and a week-by-week breakdown in Monthly (weeks run Monday–Sunday everywhere)",
+    "The header and Balance card now show net (income − expenses), color-coded green when positive and red when negative, instead of expenses-only",
+    "Removed per-category monthly budget caps and personal spending limits, along with the 'Budget status' card — the Budgets tab now just shows spending totals by category and by person for whichever period you've selected",
+    "'Add a category' no longer asks for a budget amount — just a name"
+  ]},
   { version: "1.2.5", notes: [
     "Added a month switcher (‹ / ›) at the top of the Dashboard — Balance, Personal Spending, Recent Activity, and both Budgets tabs now all show whichever month you've navigated to, with a 'Jump back to this month' shortcut",
     "Recent Activity is now scoped to the selected month (up to 20 entries) instead of always showing the latest few transactions regardless of month"
@@ -271,8 +277,9 @@ function currentMonthKey(){ const d = new Date(); return `${d.getFullYear()}-${S
 function showToast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2600); }
 function names(){ const s = STATE.settings||{}; return { p1: s.partner1Name||"Partner 1", p2: s.partner2Name||"Partner 2" }; }
 
-// Which month the Dashboard/Budgets/Personal screens are currently showing.
-// Defaults to the current month; the ‹ › controls on the Dashboard move it.
+// Which month the Budgets/Personal screens are currently showing, and the
+// fallback granularity for the Dashboard. Defaults to the current month; the
+// ‹ › controls on the Dashboard move it (see the period helpers below).
 let selectedMonthKey = currentMonthKey();
 function monthKeyToDate(key){ const [y,m] = key.split('-').map(Number); return new Date(y, m-1, 1); }
 function shiftMonthKey(key, delta){
@@ -282,6 +289,98 @@ function shiftMonthKey(key, delta){
 }
 function monthKeyLabel(key){
   return monthKeyToDate(key).toLocaleDateString('en-GB', { month:'long', year:'numeric' });
+}
+
+/* ---------------- Daily / Weekly / Monthly period state ----------------
+   All weeks are Monday–Sunday. `granularity` plus one of the three selected*
+   keys below is the single source of truth for what the Dashboard (and, by
+   extension, the Budgets screen, which shares the same period) is showing —
+   the ‹ › controls and the Daily/Weekly/Monthly tabs both just mutate this
+   same state and re-render, so there's only ever one place tracking "when". */
+let granularity = 'monthly'; // 'daily' | 'weekly' | 'monthly'
+function dateOnly(d){ return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function dateToKey(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function keyToDate(key){ const [y,m,d] = key.split('-').map(Number); return new Date(y, m-1, d); }
+function addDays(d, n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
+// Monday of the week containing `d` (local time, no UTC conversion — avoids
+// the off-by-one-day trap of doing this via toISOString()).
+function mondayOf(d){
+  const day = d.getDay(); // 0=Sun..6=Sat
+  const diffToMonday = (day === 0 ? -6 : 1 - day);
+  return dateOnly(addDays(d, diffToMonday));
+}
+function todayKey(){ return dateToKey(new Date()); }
+function currentWeekStartKey(){ return dateToKey(mondayOf(new Date())); }
+
+let selectedDayKey = todayKey();
+let selectedWeekStartKey = currentWeekStartKey();
+
+function isCurrentPeriod(){
+  if(granularity==='daily') return selectedDayKey === todayKey();
+  if(granularity==='weekly') return selectedWeekStartKey === currentWeekStartKey();
+  return selectedMonthKey === currentMonthKey();
+}
+function shiftPeriod(delta){
+  if(granularity==='daily') selectedDayKey = dateToKey(addDays(keyToDate(selectedDayKey), delta));
+  else if(granularity==='weekly') selectedWeekStartKey = dateToKey(addDays(keyToDate(selectedWeekStartKey), delta*7));
+  else selectedMonthKey = shiftMonthKey(selectedMonthKey, delta);
+}
+function jumpToCurrentPeriod(){
+  if(granularity==='daily') selectedDayKey = todayKey();
+  else if(granularity==='weekly') selectedWeekStartKey = currentWeekStartKey();
+  else selectedMonthKey = currentMonthKey();
+}
+function periodLabel(){
+  if(granularity==='daily'){
+    return keyToDate(selectedDayKey).toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'long', year:'numeric' });
+  }
+  if(granularity==='weekly'){
+    const start = keyToDate(selectedWeekStartKey);
+    const end = addDays(start, 6);
+    const startStr = start.toLocaleDateString('en-GB', { day:'numeric', month: start.getMonth()===end.getMonth() ? undefined : 'short' });
+    const endStr = end.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+    return `${startStr} – ${endStr}`;
+  }
+  return monthKeyLabel(selectedMonthKey);
+}
+function periodNoun(){
+  return granularity==='daily' ? 'today' : granularity==='weekly' ? 'this week' : 'this month';
+}
+// Matches a transaction's date against whatever period is currently selected.
+function txInSelectedPeriod(t){
+  const dateStr = (t.date||"").slice(0,10);
+  if(!dateStr) return false;
+  if(granularity==='daily') return dateStr === selectedDayKey;
+  if(granularity==='weekly'){
+    const d = keyToDate(dateStr);
+    const start = keyToDate(selectedWeekStartKey);
+    return d >= start && d <= addDays(start, 6);
+  }
+  return dateStr.slice(0,7) === selectedMonthKey;
+}
+function incomeExpenseNet(txs){
+  const income = txs.filter(t=>t.type==='income').reduce((s,t)=>s+Number(t.amount),0);
+  const expense = txs.filter(t=>t.type==='expense' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
+  return { income, expense, net: income-expense };
+}
+// Monday-start weeks overlapping a given month, each assigned to the month
+// that contains the majority (4+) of its 7 days — so a week split across a
+// month boundary shows up in exactly one of the two months, not both.
+function weeksForMonth(monthKey){
+  const monthStart = monthKeyToDate(monthKey);
+  const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth()+1, 0);
+  const weeks = [];
+  let weekStart = mondayOf(monthStart);
+  while(weekStart <= monthEnd){
+    let daysInMonth = 0;
+    for(let i=0;i<7;i++){
+      const d = addDays(weekStart, i);
+      if(d.getMonth()===monthStart.getMonth() && d.getFullYear()===monthStart.getFullYear()) daysInMonth++;
+    }
+    if(daysInMonth >= 4) weeks.push({ start: weekStart, end: addDays(weekStart,6) });
+    weekStart = addDays(weekStart, 7);
+  }
+  return weeks;
 }
 
 // Maps a category name to an icon + color for the icon badges used throughout the app.
@@ -313,34 +412,46 @@ function render(){
 
   document.getElementById('dateLabel').textContent = new Date().toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long'});
 
-  // month switcher — never let it go past the current month
-  const isCurrentMonth = selectedMonthKey === currentMonthKey();
-  document.getElementById('monthSwitchLabel').textContent = monthKeyLabel(selectedMonthKey);
-  document.getElementById('monthNextBtn').disabled = isCurrentMonth;
-  document.getElementById('monthTodayBtn').style.display = isCurrentMonth ? 'none' : 'block';
-  document.getElementById('topMonthLabel').textContent = isCurrentMonth ? 'This month' : monthKeyLabel(selectedMonthKey);
-  document.getElementById('balanceCardTitle').textContent = isCurrentMonth ? 'Balance this month' : `Balance — ${monthKeyLabel(selectedMonthKey)}`;
-  document.getElementById('personalSummaryTitle').textContent = isCurrentMonth ? 'Personal spending this month' : `Personal spending — ${monthKeyLabel(selectedMonthKey)}`;
-  document.getElementById('recentTxTitle').textContent = isCurrentMonth ? 'Recent activity' : `Activity — ${monthKeyLabel(selectedMonthKey)}`;
-  document.getElementById('dashBalanceSub').textContent = isCurrentMonth ? 'Income minus expenses, month to date' : `Income minus expenses for ${monthKeyLabel(selectedMonthKey)}`;
-  document.getElementById('budgetsMonthNote').textContent = isCurrentMonth ? 'Showing this month' : `Showing ${monthKeyLabel(selectedMonthKey)}`;
+  // period switcher — Daily / Weekly / Monthly, never lets you go past the
+  // current day/week/month. selectedMonthKey still drives the Budgets screen.
+  const isCurrent = isCurrentPeriod();
+  const label = periodLabel();
+  document.getElementById('monthSwitchLabel').textContent = label;
+  document.getElementById('monthNextBtn').disabled = isCurrent;
+  document.getElementById('monthTodayBtn').style.display = isCurrent ? 'none' : 'block';
+  document.getElementById('topMonthLabel').textContent = isCurrent ? (granularity==='daily'?'Today':granularity==='weekly'?'This week':'This month') : label;
+  document.getElementById('balanceCardTitle').textContent = isCurrent ? `Balance ${periodNoun()}` : `Balance — ${label}`;
+  document.getElementById('personalSummaryTitle').textContent = isCurrent ? `Personal spending ${periodNoun()}` : `Personal spending — ${label}`;
+  document.getElementById('recentTxTitle').textContent = isCurrent ? 'Recent activity' : `Activity — ${label}`;
+  document.getElementById('dashBalanceSub').textContent = `Income minus expenses ${isCurrent && granularity!=='monthly' ? periodNoun() : (isCurrent ? 'this month' : 'for '+label)}`;
+  document.getElementById('budgetsMonthNote').textContent = `Showing ${label}`;
 
-  const monthTx = (STATE.transactions||[]).filter(t => (t.date||"").slice(0,7) === selectedMonthKey);
-  const income = monthTx.filter(t=>t.type==='income').reduce((s,t)=>s+Number(t.amount),0);
-  const expense = monthTx.filter(t=>t.type==='expense' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
-  const net = income - expense;
+  const periodTx = (STATE.transactions||[]).filter(txInSelectedPeriod);
+  const { income, expense, net } = incomeExpenseNet(periodTx);
 
+  // Header sits on a solid purple gradient, so it needs lighter tints than
+  // the plain seafoam/danger colors used on the white cards to stay readable.
+  const headerNetColor = net > 0 ? '#8CFFC6' : net < 0 ? '#FFD1D1' : '#fff';
+  const cardNetColor = net > 0 ? 'var(--seafoam)' : net < 0 ? 'var(--danger)' : 'var(--paper)';
   document.getElementById('monthNetLabel').textContent = `${net>=0?'':'-'}${currency} ${fmt(Math.abs(net))}`;
-  document.getElementById('dashBalance').textContent = `${currency} ${fmt(net)}`;
+  document.getElementById('monthNetLabel').style.color = headerNetColor;
+  document.getElementById('dashBalance').textContent = `${net>=0?'':'-'}${currency} ${fmt(Math.abs(net))}`;
+  document.getElementById('dashBalance').style.color = cardNetColor;
+  document.getElementById('dashIncomeVal').textContent = `+${currency} ${fmt(income)}`;
+  document.getElementById('dashExpenseVal').textContent = `−${currency} ${fmt(expense)}`;
 
-  const p1Paid = monthTx.filter(t=>t.type==='expense' && t.paidBy===p1 && scopeOf(t)!=='personal' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
-  const p2Paid = monthTx.filter(t=>t.type==='expense' && t.paidBy===p2 && scopeOf(t)!=='personal' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
+  const p1Paid = periodTx.filter(t=>t.type==='expense' && t.paidBy===p1 && scopeOf(t)!=='personal' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
+  const p2Paid = periodTx.filter(t=>t.type==='expense' && t.paidBy===p2 && scopeOf(t)!=='personal' && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
   const totalPaid = p1Paid + p2Paid || 1;
   const p1pct = (p1Paid/totalPaid)*100;
   document.getElementById('whoThread').innerHTML =
     `<div class="seg p1" style="left:0;width:${p1pct}%"></div><div class="seg p2" style="left:${p1pct}%;width:${100-p1pct}%"></div>`;
   document.getElementById('p1Label').textContent = `${p1} · ${currency} ${fmt(p1Paid)}`;
   document.getElementById('p2Label').textContent = `${p2} · ${currency} ${fmt(p2Paid)}`;
+
+  // day-by-day (Weekly) / week-by-week (Monthly) breakdown — hidden for Daily
+  // since there's nothing to roll up within a single day.
+  renderBreakdown(currency);
 
   // food fund on dashboard
   document.getElementById('dashFundBalance').textContent = `${currency} ${fmt((STATE.foodFund||{}).balance)}`;
@@ -351,37 +462,23 @@ function render(){
   document.getElementById('dashPersonalSummary').innerHTML = [
     { key: 'P1', name: p1 }, { key: 'P2', name: p2 }
   ].map(p => {
-    const { spent, limit, pct, over } = personalSpendFor(p, monthTx, settings, debtsByTxId());
-    return `<div style="margin-bottom:10px">
-      <div class="row"><span style="font-weight:600">${p.name}</span><span class="mono" style="font-size:13px;color:${over?'var(--danger)':'var(--paper-dim)'}">${currency} ${fmt(spent)}${limit>0 ? ' / '+fmt(limit) : ''}</span></div>
-      ${limit>0 ? `<div class="thread" style="margin:6px 0 0"><div class="seg ${over?'over':'p2'}" style="left:0;width:${pct}%"></div></div>` : `<div class="balance-sub" style="margin-top:2px;font-size:12px">No personal limit set</div>`}
+    const spent = personalSpendFor(p, periodTx);
+    return `<div class="row" style="margin-bottom:10px">
+      <span style="font-weight:600">${p.name}</span>
+      <span class="mono" style="font-size:13px;color:var(--paper-dim)">${currency} ${fmt(spent)}</span>
     </div>`;
   }).join('');
 
   // debt summary on dashboard
   renderDebtSummary(currency, p1, p2, document.getElementById('dashDebtSummary'));
 
-  // budget overview
+  // expense category totals for the selected period (also feeds the donut
+  // and the Budgets > Household list below)
   const byCat = {};
-  monthTx.filter(t=>t.type==='expense' && scopeOf(t)!=='personal').forEach(t=>{ byCat[t.category] = (byCat[t.category]||0) + Number(t.amount); });
-  const cats = (STATE.categories||[]).slice().sort((a,b)=> (byCat[b.name]||0) - (byCat[a.name]||0)).slice(0,4);
-  document.getElementById('budgetOverview').innerHTML = cats.length ? cats.map(c=>{
-    const spent = byCat[c.name]||0;
-    const budget = Number(c.monthlyBudget)||0;
-    const pct = budget>0 ? Math.min(100,(spent/budget)*100) : 0;
-    const over = budget>0 && spent>budget;
-    const cs = categoryStyle(c.name);
-    return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
-      <span class="cat-icon-sm" style="background:${cs.color}">${cs.icon}</span>
-      <div style="flex:1;min-width:0">
-        <div class="row"><span>${c.name}</span><span class="mono" style="color:${over?'var(--danger)':'var(--paper-dim)'}">${currency} ${fmt(spent)} / ${fmt(budget)}</span></div>
-        <div class="thread"><div class="seg ${over?'over':'p2'}" style="left:0;width:${pct}%;background:${over?'var(--danger)':cs.color}"></div></div>
-      </div>
-    </div>`;
-  }).join('') : `<div class="empty">Set category budgets in the Budgets tab.</div>`;
+  periodTx.filter(t=>t.type==='expense' && scopeOf(t)!=='personal').forEach(t=>{ byCat[t.category] = (byCat[t.category]||0) + Number(t.amount); });
 
-  // recent transactions — scoped to whichever month is selected above
-  const recent = monthTx.slice().sort((a,b)=> new Date(b.date)-new Date(a.date) || new Date(b.createdAt)-new Date(a.createdAt)).slice(0,20);
+  // recent transactions — scoped to whichever period is selected above
+  const recent = periodTx.slice().sort((a,b)=> new Date(b.date)-new Date(a.date) || new Date(b.createdAt)-new Date(a.createdAt)).slice(0,20);
   document.getElementById('recentTx').innerHTML = recent.length ? recent.map(t=>{
     const dotColor = t.paidBy===p1 ? 'var(--coral)' : t.paidBy===p2 ? 'var(--blue)' : t.paidBy===FOOD_FUND_LABEL ? 'var(--gold)' : 'var(--seafoam)';
     const sign = t.type==='income' ? '+' : '−';
@@ -402,35 +499,29 @@ function render(){
         <button class="tx-del" data-id="${t.id}" title="Delete">✕</button>
       </div>
     </div>`;
-  }).join('') : `<div class="empty">${isCurrentMonth ? 'No transactions yet — add your first one below.' : 'No transactions in '+monthKeyLabel(selectedMonthKey)+'.'}</div>`;
+  }).join('') : `<div class="empty">${isCurrent ? 'No transactions yet — add your first one below.' : 'No transactions in '+label+'.'}</div>`;
 
-  // budgets screen — spending breakdown donut
+  // budgets screen — spending breakdown donut (expense categories only)
   renderSpendingDonut(byCat, currency);
 
-  // budgets screen — category rows with icon + progress bar
+  // budgets screen — plain category totals for the period, no caps
   document.getElementById('budgetList').innerHTML = (STATE.categories||[]).map(c=>{
     const spent = byCat[c.name]||0;
-    const budget = Number(c.monthlyBudget)||0;
-    const pct = budget>0 ? Math.min(100,(spent/budget)*100) : 0;
-    const over = budget>0 && spent>budget;
     const cs = categoryStyle(c.name);
-    return `<div style="margin-bottom:16px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+    return `<div class="row" style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;min-width:0">
         <span class="cat-icon-sm" style="background:${cs.color}">${cs.icon}</span>
-        <div style="flex:1;font-weight:600">${c.name}</div>
-        <span class="mono" style="font-size:12px;color:${over?'var(--danger)':'var(--paper-dim)'}">${currency} ${fmt(spent)} / ${fmt(budget)}</span>
+        <span style="font-weight:600">${c.name}</span>
       </div>
-      <div class="thread"><div class="seg ${over?'over':''}" style="left:0;width:${pct}%;background:${over?'var(--danger)':cs.color}"></div></div>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <input type="number" class="budget-input" data-cat="${c.name}" value="${c.monthlyBudget}" inputmode="decimal">
-        <button class="ghost budget-save" data-cat="${c.name}" style="width:auto;padding:0 16px;margin-top:0">Save</button>
-        <button class="ghost budget-del" data-cat="${c.name}" style="width:auto;padding:0 12px;margin-top:0;color:var(--danger)">✕</button>
+      <div style="display:flex;align-items:center;gap:10px;flex:0 0 auto">
+        <span class="mono" style="font-size:13px;color:var(--paper-dim)">${currency} ${fmt(spent)}</span>
+        <button class="ghost budget-del" data-cat="${c.name}" style="width:auto;padding:0 10px;margin-top:0;color:var(--danger)">✕</button>
       </div>
     </div>`;
   }).join('') || `<div class="empty">No categories yet.</div>`;
 
   // personal spending screen
-  renderPersonalBudgets(monthTx, currency, p1, p2, settings);
+  renderPersonalBudgets(periodTx, currency, p1, p2);
 
   // savings screen
   document.getElementById('goalsList').innerHTML = (STATE.goals||[]).map(g=>{
@@ -521,7 +612,7 @@ function renderSpendingDonut(byCat, currency){
   const entries = Object.entries(byCat).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
   const total = entries.reduce((s,[,v])=>s+v,0);
   if(!entries.length || total<=0){
-    wrap.innerHTML = `<div class="empty" style="padding:10px 0">No shared spending logged yet this month.</div>`;
+    wrap.innerHTML = `<div class="empty" style="padding:10px 0">No shared spending logged for this period.</div>`;
     return;
   }
   let cursor = 0;
@@ -546,7 +637,7 @@ function renderSpendingDonut(byCat, currency){
     <div class="donut" style="background:${gradient}">
       <div class="donut-hole">
         <div class="donut-total">${currency} ${fmt(total)}</div>
-        <div class="donut-label">This month</div>
+        <div class="donut-label">${granularity==='daily'?'Today':granularity==='weekly'?'This week':'This month'}</div>
       </div>
     </div>
     <div class="legend">${legend}</div>
@@ -569,33 +660,24 @@ function personalOwnerOf(t, debtMap){
 
 // Shared by the dashboard summary and the Budgets > Personal tab, so both
 // always agree on exactly how much of a person's spending has been deducted.
-function personalSpendFor(person, monthTx, settings, debtMap){
-  const spent = monthTx.filter(t=>t.type==='expense' && scopeOf(t)==='personal' && personalOwnerOf(t, debtMap)===person.name).reduce((s,t)=>s+Number(t.amount),0);
-  const limit = Number(settings['personalBudget'+person.key] || 0);
-  const pct = limit>0 ? Math.min(100, (spent/limit)*100) : 0;
-  const over = limit>0 && spent>limit;
-  return { spent, limit, pct, over };
+function personalSpendFor(person, periodTx){
+  const debtMap = debtsByTxId();
+  return periodTx.filter(t=>t.type==='expense' && scopeOf(t)==='personal' && personalOwnerOf(t, debtMap)===person.name).reduce((s,t)=>s+Number(t.amount),0);
 }
 
-function renderPersonalBudgets(monthTx, currency, p1, p2, settings){
+function renderPersonalBudgets(periodTx, currency, p1, p2){
   const people = [
     { key: 'P1', name: p1 },
     { key: 'P2', name: p2 }
   ];
   const debtMap = debtsByTxId();
   document.getElementById('personalBudgetCards').innerHTML = people.map(p=>{
-    const personalTx = monthTx.filter(t=>t.type==='expense' && scopeOf(t)==='personal' && personalOwnerOf(t, debtMap)===p.name)
+    const personalTx = periodTx.filter(t=>t.type==='expense' && scopeOf(t)==='personal' && personalOwnerOf(t, debtMap)===p.name)
       .sort((a,b)=> new Date(b.date)-new Date(a.date) || new Date(b.createdAt)-new Date(a.createdAt));
-    const { spent, limit, pct, over } = personalSpendFor(p, monthTx, settings, debtMap);
+    const spent = personalSpendFor(p, periodTx);
     return `<div class="card">
       <h3>${p.name}'s personal spending</h3>
       <div class="balance-big mono" style="font-size:26px">${currency} ${fmt(spent)}</div>
-      <div class="balance-sub">${limit>0 ? `of ${currency} ${fmt(limit)} monthly personal budget` : 'No personal budget limit set'}</div>
-      ${limit>0 ? `<div class="thread"><div class="seg ${over?'over':'p2'}" style="left:0;width:${pct}%"></div></div>` : ''}
-      <div style="display:flex;gap:8px;margin-top:16px">
-        <input type="number" class="personal-limit-input" data-key="${p.key}" placeholder="Set monthly limit" value="${limit||''}" inputmode="decimal" style="flex:1">
-        <button class="ghost personal-limit-save" data-key="${p.key}" style="width:auto;padding:0 16px;margin-top:0">Save</button>
-      </div>
       <div style="margin-top:16px">
         ${personalTx.length ? personalTx.slice(0,8).map(t=>{
           const cs = categoryStyle(t.category || 'Personal');
@@ -610,10 +692,60 @@ function renderPersonalBudgets(monthTx, currency, p1, p2, settings){
             </div>
             <div class="amt mono expense">−${currency} ${fmt(t.amount)}</div>
           </div>`;
-        }).join('') : `<div class="empty">No personal spending logged this month.</div>`}
+        }).join('') : `<div class="empty">No personal spending logged for this period.</div>`}
       </div>
     </div>`;
   }).join('');
+}
+
+// Weekly view: day-by-day (Mon–Sun). Monthly view: week-by-week rollup.
+// Daily has nothing to break down, so the card is hidden for it.
+function renderBreakdown(currency){
+  const card = document.getElementById('breakdownCard');
+  const title = document.getElementById('breakdownTitle');
+  const list = document.getElementById('breakdownList');
+  if(granularity === 'daily'){ card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  const rowHtml = (label, txs, highlight) => {
+    const { income, expense, net } = incomeExpenseNet(txs);
+    const netColor = net > 0 ? 'var(--seafoam)' : net < 0 ? 'var(--danger)' : 'var(--paper-dim)';
+    return `<div class="breakdown-row${highlight ? ' today' : ''}">
+      <div class="br-label">${label}</div>
+      <div class="br-stats">
+        <span class="br-stat income">+${currency} ${fmt(income)}</span>
+        <span class="br-stat expense">−${currency} ${fmt(expense)}</span>
+        <span class="br-stat net mono" style="color:${netColor}">${net>=0?'':'-'}${currency} ${fmt(Math.abs(net))}</span>
+      </div>
+    </div>`;
+  };
+
+  if(granularity === 'weekly'){
+    title.textContent = 'Day by day';
+    const start = keyToDate(selectedWeekStartKey);
+    const tk = todayKey();
+    list.innerHTML = Array.from({length:7}, (_, i) => {
+      const d = addDays(start, i);
+      const key = dateToKey(d);
+      const dayTx = (STATE.transactions||[]).filter(t => (t.date||"").slice(0,10) === key);
+      const label = d.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' });
+      return rowHtml(label, dayTx, key === tk);
+    }).join('');
+  } else {
+    title.textContent = 'Week by week';
+    const weeks = weeksForMonth(selectedMonthKey);
+    const curWeekStart = currentWeekStartKey();
+    list.innerHTML = weeks.map(w => {
+      const weekTx = (STATE.transactions||[]).filter(t => {
+        const dstr = (t.date||"").slice(0,10);
+        if(!dstr) return false;
+        const d = keyToDate(dstr);
+        return d >= w.start && d <= w.end;
+      });
+      const label = `${w.start.toLocaleDateString('en-GB',{day:'numeric',month:'short'})} – ${w.end.toLocaleDateString('en-GB',{day:'numeric',month:'short'})}`;
+      return rowHtml(label, weekTx, dateToKey(w.start) === curWeekStart);
+    }).join('');
+  }
 }
 
 function renderDebtSummary(currency, p1, p2, el, big){
@@ -658,8 +790,8 @@ function updatePaidByOptions(){
 function updateScopeHint(){
   const hint = document.getElementById('scopeHint');
   hint.textContent = currentScope === 'personal'
-    ? "Personal spending — tracked separately and doesn't count against household category budgets."
-    : "Counts toward your household category budgets.";
+    ? "Personal spending — tracked separately from household totals."
+    : "Counts toward your household totals.";
 }
 
 function updateFundHint(){
@@ -680,18 +812,26 @@ function updateFundHint(){
   }
 }
 
-/* ---------------- month navigation ---------------- */
+/* ---------------- period navigation (Daily / Weekly / Monthly) ---------------- */
+document.querySelectorAll('#periodTabs button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('#periodTabs button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    granularity = btn.dataset.period;
+    render();
+  });
+});
 document.getElementById('monthPrevBtn').addEventListener('click', ()=>{
-  selectedMonthKey = shiftMonthKey(selectedMonthKey, -1);
+  shiftPeriod(-1);
   render();
 });
 document.getElementById('monthNextBtn').addEventListener('click', ()=>{
-  if(selectedMonthKey === currentMonthKey()) return; // can't go past the current month
-  selectedMonthKey = shiftMonthKey(selectedMonthKey, 1);
+  if(isCurrentPeriod()) return; // can't go past the current day/week/month
+  shiftPeriod(1);
   render();
 });
 document.getElementById('monthTodayBtn').addEventListener('click', ()=>{
-  selectedMonthKey = currentMonthKey();
+  jumpToCurrentPeriod();
   render();
 });
 
@@ -842,20 +982,9 @@ document.getElementById('recentTx').addEventListener('click', (e)=>{
 });
 
 document.getElementById('budgetList').addEventListener('click', (e)=>{
-  if(e.target.classList.contains('budget-save')){
-    const cat = e.target.dataset.cat;
-    const input = document.querySelector(`.budget-input[data-cat="${cat}"]`);
-    const monthlyBudget = Number(input.value)||0;
-    runOptimistic({
-      patch: updateInListBy('categories', c=>c.name===cat, {monthlyBudget}),
-      apiCall: () => apiPost('updateCategoryBudget', {name:cat, monthlyBudget}),
-      label: 'Update budget'
-    });
-    showToast('Budget updated');
-  }
   if(e.target.classList.contains('budget-del')){
     const cat = e.target.dataset.cat;
-    if(!confirm(`Remove the "${cat}" category? Past transactions keep this category label, they just won't have a budget anymore.`)) return;
+    if(!confirm(`Remove the "${cat}" category? Past transactions keep this category label.`)) return;
     runOptimistic({
       patch: removeFromListBy('categories', c=>c.name===cat),
       apiCall: () => apiPost('deleteCategoryBudget', {name:cat}),
@@ -865,32 +994,19 @@ document.getElementById('budgetList').addEventListener('click', (e)=>{
   }
 });
 
+// Categories no longer carry a spending cap — monthlyBudget is still sent as
+// 0 on create because the backend action (updateCategoryBudget) expects it,
+// but nothing in the UI reads or edits that value anymore.
 document.getElementById('addCatBtn').addEventListener('click', ()=>{
   const name = document.getElementById('newCatName').value.trim();
-  const monthlyBudget = Number(document.getElementById('newCatBudget').value)||0;
   if(!name){ showToast('Enter a category name'); return; }
   runOptimistic({
-    patch: addToList('categories', {name, monthlyBudget}),
-    apiCall: () => apiPost('updateCategoryBudget', { name, monthlyBudget }),
+    patch: addToList('categories', {name, monthlyBudget: 0}),
+    apiCall: () => apiPost('updateCategoryBudget', { name, monthlyBudget: 0 }),
     label: 'Add category'
   });
   showToast('Category added ✓');
-  document.getElementById('newCatName').value=''; document.getElementById('newCatBudget').value='';
-});
-
-document.getElementById('personalBudgetCards').addEventListener('click', (e)=>{
-  if(e.target.classList.contains('personal-limit-save')){
-    const key = e.target.dataset.key;
-    const input = document.querySelector(`.personal-limit-input[data-key="${key}"]`);
-    const val = Number(input.value || 0);
-    const settingsKey = 'personalBudget'+key;
-    runOptimistic({
-      patch: (s)=>{ s.settings = {...(s.settings||{}), [settingsKey]: val}; return s; },
-      apiCall: () => apiPost('updateSettings', {[settingsKey]: val}),
-      label: 'Update personal budget'
-    });
-    showToast('Personal budget updated ✓');
-  }
+  document.getElementById('newCatName').value='';
 });
 
 /* ---------------- savings goals ---------------- */

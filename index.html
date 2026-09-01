@@ -45,21 +45,38 @@
 
     <!-- DASHBOARD -->
     <section class="screen active" id="screen-dashboard">
+      <div class="subnav" id="periodTabs">
+        <button class="active" data-period="daily">Daily</button>
+        <button data-period="weekly">Weekly</button>
+        <button data-period="monthly">Monthly</button>
+      </div>
+
+      <!-- Reused for all three granularities: prev/next shift by a day, a
+           Monday-start week, or a month depending on the active tab above. -->
       <div class="month-switch">
-        <button class="m-nav" id="monthPrevBtn" aria-label="Previous month">‹</button>
+        <button class="m-nav" id="monthPrevBtn" aria-label="Previous period">‹</button>
         <div class="m-center">
           <div class="m-label" id="monthSwitchLabel">September 2026</div>
-          <button class="m-today" id="monthTodayBtn" style="display:none">Jump back to this month</button>
+          <button class="m-today" id="monthTodayBtn" style="display:none">Jump back to today</button>
         </div>
-        <button class="m-nav" id="monthNextBtn" aria-label="Next month">›</button>
+        <button class="m-nav" id="monthNextBtn" aria-label="Next period">›</button>
       </div>
 
       <div class="card">
         <h3 id="balanceCardTitle">Balance this month</h3>
         <div class="balance-big mono" id="dashBalance">AED 0</div>
         <div class="balance-sub" id="dashBalanceSub">Income minus expenses, month to date</div>
+        <div class="io-row" id="dashIncomeExpenseRow">
+          <div class="io-item"><span class="io-label">Income</span><span class="io-val mono income" id="dashIncomeVal">AED 0</span></div>
+          <div class="io-item"><span class="io-label">Expenses</span><span class="io-val mono expense" id="dashExpenseVal">AED 0</span></div>
+        </div>
         <div class="thread" id="whoThread"></div>
         <div class="thread-labels"><span id="p1Label">—</span><span id="p2Label">—</span></div>
+      </div>
+
+      <div class="card" id="breakdownCard" style="display:none">
+        <h3 id="breakdownTitle">Day by day</h3>
+        <div id="breakdownList"></div>
       </div>
 
       <div class="card">
@@ -75,11 +92,6 @@
       <div class="card">
         <h3>IOUs</h3>
         <div id="dashDebtSummary" class="balance-sub" style="font-size:14px">All settled up</div>
-      </div>
-
-      <div class="card">
-        <h3>Budget status</h3>
-        <div id="budgetOverview"></div>
       </div>
 
       <div class="card">
@@ -109,7 +121,7 @@
             <button type="button" class="active neutral" data-scope="shared" id="scopeSharedBtn">Household</button>
             <button type="button" class="neutral" data-scope="personal" id="scopePersonalBtn">Personal</button>
           </div>
-          <div class="balance-sub" id="scopeHint" style="margin-top:6px">Counts toward your household category budgets.</div>
+          <div class="balance-sub" id="scopeHint" style="margin-top:6px">Counts toward your household totals.</div>
 
           <label>Amount (AED)</label>
           <input type="number" inputmode="decimal" id="fAmount" placeholder="0.00">
@@ -180,15 +192,13 @@
           <div class="donut-wrap" id="spendingDonutWrap"></div>
         </div>
         <div class="card">
-          <h3>Monthly category budgets</h3>
+          <h3>Spending by category</h3>
           <div id="budgetList"></div>
         </div>
         <div class="card">
           <h3>Add a category</h3>
           <label style="margin-top:0">Category name</label>
           <input type="text" id="newCatName" placeholder="e.g. Pet care">
-          <label>Monthly budget (AED)</label>
-          <input type="number" inputmode="decimal" id="newCatBudget" placeholder="0.00">
           <button class="primary" id="addCatBtn">Add category</button>
         </div>
       </div>
@@ -197,7 +207,7 @@
         <div class="card">
           <div class="balance-sub">
             Personal spending is tracked per person and kept separate from the
-            household category budgets above.
+            household totals above.
           </div>
         </div>
         <div id="personalBudgetCards"></div>

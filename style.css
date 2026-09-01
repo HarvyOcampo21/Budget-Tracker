@@ -143,6 +143,23 @@
   nav.bottom button .ic{ font-size:18px; }
   nav.bottom button.active{ color:var(--primary); font-weight:700; }
 
+  .io-row{ display:flex; gap:10px; margin:14px 0 2px; }
+  .io-item{ flex:1; background:var(--surface-2); border-radius:12px; padding:10px 12px; }
+  .io-label{ display:block; font-size:11px; color:var(--paper-dim); text-transform:uppercase; letter-spacing:.06em; margin-bottom:2px; }
+  .io-val{ display:block; font-size:16px; font-weight:700; }
+  .io-val.income{ color:var(--seafoam); }
+  .io-val.expense{ color:var(--coral); }
+
+  .breakdown-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--surface-2); }
+  .breakdown-row:last-child{ border-bottom:none; }
+  .breakdown-row.today .br-label{ color:var(--primary); font-weight:700; }
+  .br-label{ font-size:13px; font-weight:600; color:var(--paper); flex:0 0 auto; min-width:76px; }
+  .br-stats{ display:flex; gap:10px; align-items:baseline; justify-content:flex-end; flex:1; flex-wrap:wrap; }
+  .br-stat{ font-size:12px; white-space:nowrap; }
+  .br-stat.income{ color:var(--seafoam); }
+  .br-stat.expense{ color:var(--coral); }
+  .br-stat.net{ font-weight:700; font-size:13px; }
+
   .goal-card .row{ margin-bottom:6px; }
   .goal-thread{ height:8px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin:8px 0 4px; }
   .goal-thread .fill{ height:100%; background:var(--grad); }
