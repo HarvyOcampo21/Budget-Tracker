@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Our Budget</title>
+
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Our Budget">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#6C5CE7">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+  <div class="pull-indicator" id="pullIndicator">
+    <span class="spinner" id="pullSpinner" style="display:none"></span>
+    <span id="pullText">Pull to refresh</span>
+  </div>
+
+  <div class="add-home-banner" id="addHomeBanner" style="display:none">
+    <span>Tip: tap <b>Share</b> → <b>Add to Home Screen</b> for the full app experience.</span>
+    <button id="dismissAddHomeBtn" aria-label="Dismiss">✕</button>
+  </div>
+
+  <header class="top">
+    <div>
+      <div class="eyebrow" id="dateLabel">—</div>
+      <h1>Our Budget</h1>
+    </div>
+    <div class="stat" style="text-align:right">
+      <div class="label" id="topMonthLabel">This month</div>
+      <div class="val mono" id="monthNetLabel">—</div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- DASHBOARD -->
+    <section class="screen active" id="screen-dashboard">
+      <div class="month-switch">
+        <button class="m-nav" id="monthPrevBtn" aria-label="Previous month">‹</button>
+        <div class="m-center">
+          <div class="m-label" id="monthSwitchLabel">September 2026</div>
+          <button class="m-today" id="monthTodayBtn" style="display:none">Jump back to this month</button>
+        </div>
+        <button class="m-nav" id="monthNextBtn" aria-label="Next month">›</button>
+      </div>
+
+      <div class="card">
+        <h3 id="balanceCardTitle">Balance this month</h3>
+        <div class="balance-big mono" id="dashBalance">AED 0</div>
+        <div class="balance-sub" id="dashBalanceSub">Income minus expenses, month to date</div>
+        <div class="thread" id="whoThread"></div>
+        <div class="thread-labels"><span id="p1Label">—</span><span id="p2Label">—</span></div>
+      </div>
+
+      <div class="card">
+        <div class="row"><h3 style="margin:0">Food Fund</h3><span class="mono" id="dashFundBalance">AED 0</span></div>
+        <div class="balance-sub" style="margin-top:6px">Shared pot for groceries & food</div>
+      </div>
+
+      <div class="card">
+        <h3 id="personalSummaryTitle">Personal spending this month</h3>
+        <div id="dashPersonalSummary"></div>
+      </div>
+
+      <div class="card">
+        <h3>IOUs</h3>
+        <div id="dashDebtSummary" class="balance-sub" style="font-size:14px">All settled up</div>
+      </div>
+
+      <div class="card">
+        <h3>Budget status</h3>
+        <div id="budgetOverview"></div>
+      </div>
+
+      <div class="card">
+        <h3 id="recentTxTitle">Recent activity</h3>
+        <div id="recentTx"><div class="empty">No transactions yet — add your first one below.</div></div>
+      </div>
+    </section>
+
+    <!-- ADD -->
+    <section class="screen" id="screen-add">
+      <div class="subnav">
+        <button class="active" data-addmode="manual">Manual entry</button>
+        <button data-addmode="scan">Scan receipt</button>
+      </div>
+
+      <!-- manual entry -->
+      <div class="sub-view active" id="addmode-manual">
+        <div class="card">
+          <h3>Log a transaction</h3>
+          <div class="seg-toggle">
+            <button type="button" class="active expense" data-type="expense" id="typeExpenseBtn">Expense</button>
+            <button type="button" class="income" data-type="income" id="typeIncomeBtn">Income</button>
+          </div>
+
+          <label>Household or personal</label>
+          <div class="seg-toggle">
+            <button type="button" class="active neutral" data-scope="shared" id="scopeSharedBtn">Household</button>
+            <button type="button" class="neutral" data-scope="personal" id="scopePersonalBtn">Personal</button>
+          </div>
+          <div class="balance-sub" id="scopeHint" style="margin-top:6px">Counts toward your household category budgets.</div>
+
+          <label>Amount (AED)</label>
+          <input type="number" inputmode="decimal" id="fAmount" placeholder="0.00">
+
+          <label>Date</label>
+          <input type="date" id="fDate">
+
+          <div id="categoryField">
+            <label>Category</label>
+            <select id="fCategory"></select>
+          </div>
+
+          <label id="paidByLabel">Paid by</label>
+          <select id="fPaidBy"></select>
+          <div class="balance-sub" id="fundHint" style="display:none;margin-top:6px"></div>
+
+          <label>Note (optional)</label>
+          <input type="text" id="fNote" placeholder="e.g. Carrefour groceries">
+
+          <div class="check-row" id="actuallyForRow" style="display:none">
+            <input type="checkbox" id="fActuallyFor">
+            <span id="actuallyForLabel">This was actually for their share</span>
+          </div>
+
+          <button class="primary" id="submitTx">Save transaction</button>
+        </div>
+      </div>
+
+      <!-- receipt scan -->
+      <div class="sub-view" id="addmode-scan">
+        <div class="card">
+          <h3>Scan a receipt</h3>
+          <label style="margin-top:0">Photo or PDF</label>
+          <div class="scan-drop" id="scanDrop">Tap to take a photo, choose from your library, or pick a PDF</div>
+          <input type="file" id="scanFile" accept="image/*,application/pdf" style="display:none">
+
+          <label>Who paid</label>
+          <select id="scanPaidBy"></select>
+
+          <label>Category</label>
+          <select id="scanCategory"></select>
+
+          <button class="primary" id="scanBtn">Scan with AI</button>
+          <div class="empty" id="scanHint" style="padding:10px 0 0">Needs a Gemini  key — set it up once in Settings.</div>
+        </div>
+
+        <div class="card" id="scanResultsCard" style="display:none">
+          <h3>Review items</h3>
+          <div id="scanItems"></div>
+          <button class="ghost" id="addItemBtn">+ Add item</button>
+          <div class="receipt-summary" id="receiptSummary"></div>
+          <button class="primary" id="saveReceiptBtn">Save to transactions</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- BUDGETS -->
+    <section class="screen" id="screen-budgets">
+      <div class="balance-sub" id="budgetsMonthNote" style="text-align:center;margin-bottom:10px">Showing September 2026</div>
+      <div class="subnav">
+        <button class="active" data-budgetview="household">Household</button>
+        <button data-budgetview="personal">Personal</button>
+      </div>
+
+      <div class="sub-view active" id="budgetview-household">
+        <div class="card">
+          <h3>Spending breakdown</h3>
+          <div class="donut-wrap" id="spendingDonutWrap"></div>
+        </div>
+        <div class="card">
+          <h3>Monthly category budgets</h3>
+          <div id="budgetList"></div>
+        </div>
+        <div class="card">
+          <h3>Add a category</h3>
+          <label style="margin-top:0">Category name</label>
+          <input type="text" id="newCatName" placeholder="e.g. Pet care">
+          <label>Monthly budget (AED)</label>
+          <input type="number" inputmode="decimal" id="newCatBudget" placeholder="0.00">
+          <button class="primary" id="addCatBtn">Add category</button>
+        </div>
+      </div>
+
+      <div class="sub-view" id="budgetview-personal">
+        <div class="card">
+          <div class="balance-sub">
+            Personal spending is tracked per person and kept separate from the
+            household category budgets above.
+          </div>
+        </div>
+        <div id="personalBudgetCards"></div>
+      </div>
+    </section>
+
+    <!-- SAVINGS -->
+    <section class="screen" id="screen-savings">
+      <div class="card">
+        <h3>New savings goal</h3>
+        <label>Goal name</label>
+        <input type="text" id="gName" placeholder="e.g. Vacation fund">
+        <label>Target amount (AED)</label>
+        <input type="number" inputmode="decimal" id="gTarget" placeholder="0.00">
+        <label>Starting amount (optional)</label>
+        <input type="number" inputmode="decimal" id="gStart" placeholder="0.00">
+        <label>Target date (optional)</label>
+        <input type="date" id="gDeadline">
+        <button class="primary" id="addGoalBtn">Create goal</button>
+      </div>
+      <div id="goalsList"></div>
+    </section>
+
+    <!-- SHARED: Food Fund + Debts -->
+    <section class="screen" id="screen-shared">
+      <div class="subnav">
+        <button class="active" data-subview="food">Food Fund</button>
+        <button data-subview="debts">IOUs</button>
+      </div>
+
+      <div class="sub-view active" id="subview-food">
+        <div class="card">
+          <h3>Food Fund balance</h3>
+          <div class="balance-big mono" id="fundBalanceBig">AED 0</div>
+          <div class="balance-sub">Both of you top this up, and pull from it when you shop for food. Contributing counts against your income; spending from the fund doesn't count again.</div>
+        </div>
+        <div class="card">
+          <h3>Contribute</h3>
+          <label style="margin-top:0">Who</label>
+          <select id="fundContribBy"></select>
+          <div id="fundContribWarning" style="display:none"></div>
+          <label>Amount (AED)</label>
+          <input type="number" inputmode="decimal" id="fundContribAmount" placeholder="0.00">
+          <button class="primary" id="fundContribBtn">Add contribution</button>
+        </div>
+        <div class="card">
+          <h3>Spend from fund</h3>
+          <label style="margin-top:0">Who's spending</label>
+          <select id="fundSpendBy"></select>
+          <label>Amount (AED)</label>
+          <input type="number" inputmode="decimal" id="fundSpendAmount" placeholder="0.00">
+          <label>Note (optional)</label>
+          <input type="text" id="fundSpendNote" placeholder="e.g. Weekly groceries">
+          <button class="primary" id="fundSpendBtn">Log spend</button>
+        </div>
+        <div class="card">
+          <h3>Fund history</h3>
+          <div id="fundHistory"><div class="empty">No activity yet.</div></div>
+        </div>
+      </div>
+
+      <div class="sub-view" id="subview-debts">
+        <div class="card">
+          <h3>Net balance</h3>
+          <div class="balance-big" id="debtNetBig" style="font-size:22px">All settled up</div>
+        </div>
+        <div class="card">
+          <h3>Add an IOU</h3>
+          <label style="margin-top:0">Who owes</label>
+          <select id="debtFrom"></select>
+          <label>Who they owe</label>
+          <select id="debtTo"></select>
+          <label>Amount (AED)</label>
+          <input type="number" inputmode="decimal" id="debtAmount" placeholder="0.00">
+          <label>Reason (optional)</label>
+          <input type="text" id="debtReason" placeholder="e.g. Covered dinner">
+          <button class="primary" id="addDebtBtn">Add IOU</button>
+        </div>
+        <div class="card">
+          <h3>Open IOUs</h3>
+          <div id="debtsList"><div class="empty">No open IOUs.</div></div>
+          <button class="link" id="toggleSettledBtn" style="margin-top:10px">Show settled</button>
+          <div id="settledDebtsList" style="display:none;margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="screen" id="screen-settings">
+      <div class="card">
+        <h3>Connection</h3>
+        <label>Apps Script Web App URL</label>
+        <input type="text" id="sApiUrl" placeholder="https://script.google.com/macros/s/.../exec">
+        <label>Passcode</label>
+        <input type="text" id="sPasscode" placeholder="Shared passcode">
+        <button class="primary" id="saveConnBtn">Save & connect</button>
+        <button class="ghost" id="testConnBtn">Test connection</button>
+      </div>
+      <div class="card">
+        <h3>Names</h3>
+        <label id="p1NameLabel">Partner 1 name</label>
+        <input type="text" id="sP1Name" placeholder="Partner 1">
+        <label id="p2NameLabel">Partner 2 name</label>
+        <input type="text" id="sP2Name" placeholder="Partner 2">
+        <button class="primary" id="saveNamesBtn">Save names</button>
+      </div>
+      <div class="card">
+        <h3>Receipt scanning (AI)</h3>
+        <label style="margin-top:0">Gemini API key</label>
+        <input type="text" id="sGeminiKey" placeholder="Paste your free Gemini API key">
+        <button class="primary" id="saveGeminiBtn">Save key</button>
+        <p style="font-size:12px;color:var(--paper-dim);line-height:1.6;margin:12px 0 0">
+          Free, no credit card. Get one at
+          <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--seafoam-soft)">aistudio.google.com/apikey</a>.
+          Stored only on this phone.
+        </p>
+      </div>
+      <div class="card">
+        <h3>About</h3>
+        <p style="font-size:13px;color:var(--paper-dim);line-height:1.6;margin:0">
+          Your data lives in your Google Sheet. This app is just the window into it —
+          reinstall it anytime without losing anything.
+        </p>
+        <div class="row" style="margin-top:14px">
+          <span class="label" style="font-size:11px;color:var(--paper-dim);text-transform:uppercase;letter-spacing:.08em">Version</span>
+          <span class="mono" id="appVersionLabel">—</span>
+        </div>
+        <button class="link" id="toggleChangelogBtn" style="margin-top:10px">View changelog</button>
+        <div id="changelogList" style="display:none;margin-top:12px"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <nav class="bottom">
+    <button class="active" data-screen="dashboard"><span class="ic">◐</span>Home</button>
+    <button data-screen="add"><span class="ic">+</span>Add</button>
+    <button data-screen="shared"><span class="ic">⇄</span>Shared</button>
+    <button data-screen="budgets"><span class="ic">▤</span>Budgets</button>
+    <button data-screen="savings"><span class="ic">◈</span>Savings</button>
+    <button data-screen="settings"><span class="ic">⚙</span>Settings</button>
+  </nav>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<script src="./script.js"></script>
+</body>
+</html>
