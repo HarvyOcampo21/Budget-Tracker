@@ -12,7 +12,7 @@
  * (Deploy > Manage deployments > Edit > New version > Deploy).
  *
  * ============================================================
- * SCRIPT VERSION: 1.3.0
+ * SCRIPT VERSION: 1.4.0
  * ------------------------------------------------------------
  * This is this file's OWN version number — it only moves when
  * Code.gs itself changes (a new action, a new sheet/column, a
@@ -26,6 +26,42 @@
  * what changed in the backend.
  * ------------------------------------------------------------
  * CHANGELOG
+ *   v1.4.0 – Transaction-driven Savings ledger, layered on top of
+ *            the existing manual Savings Goals (unchanged). New
+ *            SavingsLedger sheet (id, type, amount, by, note,
+ *            date, createdAt, linkedTransactionId — same shape as
+ *            FoodFund, per the brief). A new "Savings" category
+ *            (added to Categories, migrated into existing sheets
+ *            too) triggers addSavingsContribution_ from inside
+ *            addTransaction_ whenever an expense uses it — this is
+ *            an internal ledger-append helper, not its own doPost
+ *            action, since contribution happens through the
+ *            *normal* Add Transaction form (selecting "Savings" as
+ *            the category), unlike Food Fund's dedicated
+ *            contribute/spend UI. addSavingsWithdrawal_ posts a
+ *            real income transaction (money genuinely re-entering
+ *            checking) plus a "withdrawal" ledger row, and tracks
+ *            an "owed back" balance for whoever withdrew.
+ *            addSavingsRepayment_ posts a real expense transaction
+ *            — same real-money mechanics as a contribution — plus
+ *            a "repayment" ledger row that's distinct from a
+ *            voluntary contribution so the ledger stays auditable.
+ *            Because addSavingsRepayment_ needs addTransaction_ to
+ *            create that expense but must NOT also let
+ *            addTransaction_'s own category==="Savings" hook fire
+ *            a SECOND, redundant "contribution" row for the same
+ *            real transaction, addTransaction_ now takes an
+ *            optional second argument, { skipSavingsHook }, used
+ *            only by that one internal call path — this is the
+ *            exact class of double-append bug the brief flagged as
+ *            the highest risk here. deleteTransaction_ now also
+ *            cascades into SavingsLedger cleanup via
+ *            deleteSavingsLedgerEntryByTxId_, mirroring
+ *            deleteFundEntryByTxId_ — this covers contribution,
+ *            withdrawal, and repayment transactions alike, since
+ *            it matches on linkedTransactionId rather than on
+ *            category (a withdrawal's linked transaction has
+ *            category "Income", not "Savings").
  *   v1.3.0 – Partner display names now come from Users.displayName
  *            instead of the manually-typed partner1Name/partner2Name
  *            Settings keys, which are no longer seeded (existing
@@ -143,7 +179,8 @@ const SHEET_NAMES = {
   DEBTS: "Debts",
   USERS: "Users",
   SESSIONS: "Sessions",
-  PASSWORD_RESETS: "PasswordResets"
+  PASSWORD_RESETS: "PasswordResets",
+  SAVINGS_LEDGER: "SavingsLedger"
 };
 
 // Salted SHA-256, stretched with many iterations, as a lightweight KDF.
@@ -180,10 +217,17 @@ function initialize() {
       ["Entertainment", 400],
       ["Shopping", 600],
       ["Health", 400],
-      ["Other", 300]
+      ["Other", 300],
+      ["Savings", 0]
     ];
     defaults.forEach(r => cat.appendRow(r));
   }
+  // Added in v1.4.0 — existing sheets from before the Savings ledger don't
+  // have this category yet, so it needs to be selectable in the Add
+  // Transaction category dropdown for the addTransaction_ hook below to ever
+  // trigger. monthlyBudget is vestigial today (the app no longer enforces
+  // spending caps), so 0 matches every other category's default.
+  ensureCategoryExists_(cat, "Savings", 0);
 
   const goals = getOrCreateSheet_(ss, SHEET_NAMES.GOALS);
   if (goals.getLastRow() === 0) {
@@ -241,6 +285,14 @@ function initialize() {
     passwordResets.appendRow(["token", "username", "createdAt", "used"]);
   }
 
+  // Added in v1.4.0. Same shape as FoodFund, per the brief — a dedicated
+  // ledger of contribution/withdrawal/repayment rows, each optionally linked
+  // back to the real Transaction row that moved the actual money.
+  const savingsLedger = getOrCreateSheet_(ss, SHEET_NAMES.SAVINGS_LEDGER);
+  if (savingsLedger.getLastRow() === 0) {
+    savingsLedger.appendRow(["id", "type", "amount", "by", "note", "date", "createdAt", "linkedTransactionId"]);
+  }
+
   SpreadsheetApp.flush();
   Logger.log("Initialized. Tabs: " + Object.values(SHEET_NAMES).join(", "));
   Logger.log("Accounts can now be created either via the app's own sign-up screen, or manually with createUser_('username','password','Display Name','email@example.com') from this editor.");
@@ -278,6 +330,18 @@ function ensureSettingKey_(sheet, key, defaultValue) {
     if (values[i][0] === key) return; // already present
   }
   sheet.appendRow([key, defaultValue]);
+}
+
+// Adds a category row if that name doesn't exist yet. Same idempotent
+// migration shape as ensureSettingKey_, but for Categories — needed because
+// v1.4.0 added a "Savings" category to sheets that were initialized before
+// it existed. (Added in v1.4.0.)
+function ensureCategoryExists_(sheet, name, defaultBudget) {
+  const values = sheet.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === name) return; // already present
+  }
+  sheet.appendRow([name, defaultBudget]);
 }
 
 // ------- WEB APP ENTRY POINTS -------
@@ -377,6 +441,12 @@ function doPost(e) {
       case "deleteDebt":
         result = deleteDebt_(body.payload.id);
         break;
+      case "addSavingsWithdrawal":
+        result = addSavingsWithdrawal_(body.payload);
+        break;
+      case "addSavingsRepayment":
+        result = addSavingsRepayment_(body.payload);
+        break;
       default:
         throw new Error("Unknown action: " + body.action);
     }
@@ -415,7 +485,8 @@ function getAllData_() {
     settings: getSettings_(),
     foodFund: getFoodFund_(),
     debts: getDebts_(),
-    users: getUsers_()
+    users: getUsers_(),
+    savingsLedger: getSavingsLedger_()
   };
 }
 
@@ -478,6 +549,24 @@ function getDebts_() {
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   return rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
+}
+
+// Combined total mirrors Food Fund's balance calc, extended to a third
+// entry type: contributions and repayments both add real money into the
+// pot, a withdrawal draws it back out. Per-person totals and "owed back"
+// balances are left to the frontend to compute from the raw entries —
+// same division of labor as the existing per-person dashboard split, which
+// is also computed client-side from raw transactions rather than here.
+function getSavingsLedger_() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const values = sh.getDataRange().getValues();
+  const [header, ...rows] = values;
+  const entries = rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
+  let combinedTotal = 0;
+  entries.forEach(e => {
+    combinedTotal += e.type === "withdrawal" ? -Number(e.amount) : Number(e.amount);
+  });
+  return { combinedTotal, entries };
 }
 
 // Google Sheets silently auto-converts plain "yyyy-MM-dd" strings written into
@@ -782,7 +871,14 @@ function hashPassword_(password, salt) {
 
 const FOOD_FUND_LABEL = "Food Fund";
 
-function addTransaction_(payload) {
+// `options.skipSavingsHook` exists solely so addSavingsRepayment_ can create
+// its real expense Transaction (category "Savings", exactly like a normal
+// contribution) WITHOUT the hook below also firing a second, redundant
+// "contribution" ledger row for that same transaction — addSavingsRepayment_
+// appends its own "repayment" row right after this returns instead. No
+// other caller should ever set this; it's not something a payload should
+// carry, which is why it's a second argument instead of a payload field.
+function addTransaction_(payload, options) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TX);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
@@ -826,6 +922,16 @@ function addTransaction_(payload) {
     fundSh.appendRow([fundId, "spend", Number(payload.amount), FOOD_FUND_LABEL, payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, id]);
   }
 
+  // If "Savings" was chosen as the category on a normal expense, log a
+  // matching contribution in the Savings ledger. Unlike Food Fund's
+  // paidBy-triggered hook above, this is category-triggered and runs
+  // through the SAME normal Add Transaction flow — there's no separate
+  // dedicated "contribute" action or scope override, so a Savings expense
+  // can freely be shared or personal, same as any other category.
+  if (payload.type === "expense" && payload.category === "Savings" && !(options && options.skipSavingsHook)) {
+    addSavingsContribution_(id, payload, createdAt);
+  }
+
   return { id, debtId };
 }
 
@@ -836,6 +942,7 @@ function deleteTransaction_(id) {
     if (values[i][0] === id) {
       sh.deleteRow(i + 1);
       deleteFundEntryByTxId_(id); // reverse any linked Food Fund contribution/spend
+      deleteSavingsLedgerEntryByTxId_(id); // reverse any linked Savings contribution/withdrawal/repayment
       return { deleted: true };
     }
   }
@@ -1016,6 +1123,87 @@ function deleteFoodFundEntry_(id) {
     }
   }
   return { deleted: false };
+}
+
+// ------- DATA WRITE: Savings ledger -------
+
+// Internal ledger-append helper, called from inside addTransaction_ — not
+// its own doPost action. A "Savings" contribution happens by picking
+// "Savings" as the category on a normal expense in the Add Transaction
+// screen, not through a dedicated action the way Food Fund's contribute
+// flow works, so there's nothing for a separate exposed action to do beyond
+// what addTransaction_ already does.
+function addSavingsContribution_(txId, payload, createdAt) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const id = Utilities.getUuid();
+  sh.appendRow([id, "contribution", Number(payload.amount), payload.paidBy || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, txId]);
+  return { id };
+}
+
+// Withdrawing posts a real income transaction — this is genuinely new
+// liquidity re-entering checking, not money that was already counted
+// elsewhere, so (unlike Food Fund spends) it's a normal "shared" scope
+// entry that counts fully toward income/expense totals. category is
+// "Income", matching every other income row in this app, not "Savings" —
+// the link back to Savings lives in the ledger row's linkedTransactionId,
+// not in the transaction's own category.
+function addSavingsWithdrawal_(payload) {
+  const tx = addTransaction_({
+    type: "income",
+    amount: payload.amount,
+    date: payload.date,
+    category: "Income",
+    paidBy: payload.by,
+    note: payload.note ? "Savings withdrawal: " + payload.note : "Savings withdrawal",
+    scope: "shared"
+  });
+
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const id = Utilities.getUuid();
+  const createdAt = new Date().toISOString();
+  sh.appendRow([id, "withdrawal", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, tx.id]);
+  return { id, transactionId: tx.id };
+}
+
+// Repaying is real money leaving checking back into savings — the same
+// mechanics as a normal contribution (real expense, category "Savings") —
+// just tagged "repayment" in the ledger instead of "contribution" so it's
+// auditable as clearing a specific owed-back balance rather than a fresh
+// voluntary saving. skipSavingsHook is required here: without it,
+// addTransaction_'s own category==="Savings" hook would ALSO fire and
+// append a second "contribution" row for this same transaction.
+function addSavingsRepayment_(payload) {
+  const tx = addTransaction_({
+    type: "expense",
+    amount: payload.amount,
+    date: payload.date,
+    category: "Savings",
+    paidBy: payload.by,
+    note: payload.note ? "Savings repayment: " + payload.note : "Savings repayment",
+    scope: "shared"
+  }, { skipSavingsHook: true });
+
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const id = Utilities.getUuid();
+  const createdAt = new Date().toISOString();
+  sh.appendRow([id, "repayment", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, tx.id]);
+  return { id, transactionId: tx.id };
+}
+
+// Mirrors deleteFundEntryByTxId_ exactly, including matching on
+// linkedTransactionId rather than on any property of the ledger row's own
+// type — a withdrawal's linked transaction has category "Income", not
+// "Savings", so this can't key off category the way the addTransaction_
+// hook does.
+function deleteSavingsLedgerEntryByTxId_(txId) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][7] === txId) {
+      sh.deleteRow(i + 1);
+      return;
+    }
+  }
 }
 
 // ------- DATA WRITE: Debts / IOUs -------

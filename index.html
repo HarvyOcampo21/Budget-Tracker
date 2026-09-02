@@ -181,6 +181,12 @@
         <div class="thread-labels"><span id="p1Label">—</span><span id="p2Label">—</span></div>
       </div>
 
+      <div class="card">
+        <h3>Individual balance</h3>
+        <div class="balance-sub" style="margin-bottom:10px">All-time: what each of you has brought in, minus everything each of you has personally paid.</div>
+        <div id="individualBalanceList"></div>
+      </div>
+
       <div class="card" id="breakdownCard" style="display:none">
         <h3 id="breakdownTitle">Day by day</h3>
         <div id="breakdownList"></div>
@@ -323,6 +329,42 @@
 
     <!-- SAVINGS -->
     <section class="screen" id="screen-savings">
+      <div class="card">
+        <h3>Savings overview</h3>
+        <div class="balance-big mono" id="savingsCombinedTotal">AED 0</div>
+        <div class="balance-sub" style="margin-bottom:14px">Combined total saved — every contribution and repayment, minus withdrawals.</div>
+        <div id="savingsPersonBreakdown"></div>
+      </div>
+
+      <div class="card">
+        <h3>Withdraw</h3>
+        <div class="balance-sub" style="margin-bottom:10px">For real emergencies — this posts as income coming back into checking, and tracks an "owed back" balance for whoever withdraws.</div>
+        <label style="margin-top:0">Who's withdrawing</label>
+        <select id="savingsWithdrawBy"></select>
+        <label>Amount (AED)</label>
+        <input type="number" inputmode="decimal" id="savingsWithdrawAmount" placeholder="0.00">
+        <label>Note (optional)</label>
+        <input type="text" id="savingsWithdrawNote" placeholder="e.g. Car repair">
+        <button class="primary" id="savingsWithdrawBtn">Withdraw</button>
+      </div>
+
+      <div class="card" id="savingsRepayCard" style="display:none">
+        <h3>Repay</h3>
+        <div class="balance-sub" style="margin-bottom:10px">Clears an owed-back balance from a past withdrawal — this also counts toward the combined total, same as a normal contribution.</div>
+        <label style="margin-top:0">Who's repaying</label>
+        <select id="savingsRepayBy"></select>
+        <label>Amount (AED)</label>
+        <input type="number" inputmode="decimal" id="savingsRepayAmount" placeholder="0.00">
+        <label>Note (optional)</label>
+        <input type="text" id="savingsRepayNote" placeholder="Optional note">
+        <button class="primary" id="savingsRepayBtn">Repay</button>
+      </div>
+
+      <div class="card">
+        <h3>Savings activity</h3>
+        <div id="savingsHistory"><div class="empty">No activity yet.</div></div>
+      </div>
+
       <div class="card">
         <h3>New savings goal</h3>
         <label>Goal name</label>

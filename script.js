@@ -5,8 +5,15 @@ const CACHE_KEY = "ourbudget_cache_v1";
 // Bump this with every release, and add a matching entry to CHANGELOG below.
 // Also bump the CACHE_NAME in sw.js to the same value so Safari's standalone
 // app picks up the new files instead of serving a stale cached copy.
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.7.0";
 const CHANGELOG = [
+  { version: "1.7.0", notes: [
+    "Added an all-time Individual Balance card to the Dashboard (income minus everything each of you has personally paid)",
+    "Savings is now transaction-driven — pick 'Savings' as the category on a normal expense and it's tracked in a new combined + per-person Savings overview",
+    "Added Withdraw (for real emergencies — posts as income coming back into checking) and Repay, which tracks and clears an 'owed back' balance per person",
+    "Existing manual Savings Goals cards are unchanged and still work exactly as before",
+    "Requires the matching Code.gs v1.4.0 update — see that file's changelog"
+  ]},
   { version: "1.6.0", notes: [
     "Removed the manual Partner 1/2 name fields from Settings — the two partner names shown everywhere now come from each person's account instead",
     "Sign-up is now capped at 2 accounts, since the app's whole model (dashboard split, IOUs, personal spending) assumes exactly two people",
@@ -120,7 +127,7 @@ function setConfig(c){ localStorage.setItem(CFG_KEY, JSON.stringify(c)); }
 function getCache(){ try{ return JSON.parse(localStorage.getItem(CACHE_KEY)) || null; }catch(e){ return null; } }
 function setCache(d){ localStorage.setItem(CACHE_KEY, JSON.stringify(d)); }
 
-const EMPTY_STATE = { transactions: [], categories: [], goals: [], settings: {}, foodFund: {balance:0, entries:[]}, debts: [], users: [] };
+const EMPTY_STATE = { transactions: [], categories: [], goals: [], settings: {}, foodFund: {balance:0, entries:[]}, debts: [], users: [], savingsLedger: {combinedTotal:0, entries:[]} };
 // CONFIRMED holds the last state we know the backend actually has (from a full
 // getAll fetch, or patched in directly the moment a mutation is confirmed).
 // STATE is what's rendered: CONFIRMED with every still-pending optimistic
@@ -273,11 +280,13 @@ async function loadAll(showToastOnFail, showSuccessToast){
 }
 
 // Builds the plain objects for a transaction (+ its optional auto-created IOU
-// and/or Food Fund ledger entry) exactly as Code.gs's addTransaction_ would,
-// so the optimistic version on screen matches what the Sheet ends up with.
-function makeTxObjects(payload, txId, debtId, fundEntryId){
+// and/or Food Fund / Savings ledger entry) exactly as Code.gs's
+// addTransaction_ would, so the optimistic version on screen matches what
+// the Sheet ends up with.
+function makeTxObjects(payload, txId, debtId, fundEntryId, savingsEntryId){
   const nowIso = new Date().toISOString();
   const isFundPay = payload.type === 'expense' && payload.paidBy === FOOD_FUND_LABEL;
+  const isSavingsContribution = payload.type === 'expense' && payload.category === 'Savings';
   const scope = isFundPay ? 'fund' : (payload.scope || 'shared');
   const tx = { id: txId, date: payload.date, type: payload.type, amount: Number(payload.amount), category: payload.category||'', paidBy: payload.paidBy||'', note: payload.note||'', createdAt: nowIso, scope };
   const debt = (payload.actuallyFor && payload.paidBy && payload.actuallyFor !== payload.paidBy)
@@ -286,7 +295,14 @@ function makeTxObjects(payload, txId, debtId, fundEntryId){
   const fundEntry = isFundPay
     ? { id: fundEntryId, type: 'spend', amount: Number(payload.amount), by: FOOD_FUND_LABEL, note: payload.note||'', date: payload.date, createdAt: nowIso, linkedTransactionId: txId }
     : null;
-  return { tx, debt, fundEntry };
+  // Mirrors addTransaction_'s category==="Savings" hook — this only ever
+  // applies to a transaction going through the normal add-transaction path,
+  // never to the dedicated Withdraw/Repay flows below, which build their own
+  // objects directly and never call this function.
+  const savingsEntry = isSavingsContribution
+    ? { id: savingsEntryId, type: 'contribution', amount: Number(payload.amount), by: payload.paidBy||'', note: payload.note||'', date: payload.date, createdAt: nowIso, linkedTransactionId: txId }
+    : null;
+  return { tx, debt, fundEntry, savingsEntry };
 }
 
 // Shared optimistic path for every "add a transaction" flow (the Add screen
@@ -296,7 +312,8 @@ function optimisticAddTransaction(payload, label){
   const txId = genId();
   const debtId = payload.actuallyFor ? genId() : null;
   const fundEntryId = (payload.type === 'expense' && payload.paidBy === FOOD_FUND_LABEL) ? genId() : null;
-  const built = makeTxObjects(payload, txId, debtId, fundEntryId);
+  const savingsEntryId = (payload.type === 'expense' && payload.category === 'Savings') ? genId() : null;
+  const built = makeTxObjects(payload, txId, debtId, fundEntryId, savingsEntryId);
 
   const applyObjects = (s, b) => {
     s.transactions = [...(s.transactions||[]), b.tx];
@@ -305,13 +322,17 @@ function optimisticAddTransaction(payload, label){
       const fund = s.foodFund || {balance:0, entries:[]};
       s.foodFund = { balance: fund.balance - Number(payload.amount), entries: [...(fund.entries||[]), b.fundEntry] };
     }
+    if(b.savingsEntry){
+      const ledger = s.savingsLedger || {combinedTotal:0, entries:[]};
+      s.savingsLedger = { combinedTotal: ledger.combinedTotal + Number(payload.amount), entries: [...(ledger.entries||[]), b.savingsEntry] };
+    }
     return s;
   };
 
   const opId = runOptimistic({
     patch: (s) => applyObjects(s, built),
     apiCall: () => apiPost('addTransaction', payload),
-    onSuccess: (s, result) => applyObjects(s, makeTxObjects(payload, result.id, result.debtId, fundEntryId ? 'fund_'+result.id : null)),
+    onSuccess: (s, result) => applyObjects(s, makeTxObjects(payload, result.id, result.debtId, fundEntryId ? 'fund_'+result.id : null, savingsEntryId ? 'savings_'+result.id : null)),
     label: label || 'Save transaction'
   });
   pendingCreateOpByTmpId[txId] = opId;
@@ -452,13 +473,44 @@ const CATEGORY_STYLE = {
   "Health":      { icon: "💊", color: "#FC5C65" },
   "Other":       { icon: "✨", color: "#8E88AC" },
   "Income":      { icon: "💰", color: "#20BF6B" },
-  "Food Fund":   { icon: "🍱", color: "#F5A623" }
+  "Food Fund":   { icon: "🍱", color: "#F5A623" },
+  "Savings":     { icon: "◈", color: "#4834D4" }
 };
 function categoryStyle(name){
   return CATEGORY_STYLE[name] || { icon: (name||"?").trim().charAt(0).toUpperCase() || "?", color: "#6C5CE7" };
 }
 
 function scopeOf(t){ return t.scope || 'shared'; } // legacy rows without a scope column count as shared
+
+// All-time (not scoped to the selected period, unlike the rest of the
+// dashboard) — a "balance" reads as a running total, and it needs to be
+// consistent with the Savings ledger's own owed-back tracking, which is
+// explicitly non-periodic too. Excludes 'fund' scope for the same
+// double-counting reason incomeExpenseNet does: that money was already
+// accounted for when it was contributed to the Food Fund.
+function individualBalanceFor(person){
+  const txs = STATE.transactions || [];
+  const income = txs.filter(t=>t.type==='income' && t.paidBy===person).reduce((s,t)=>s+Number(t.amount),0);
+  const paid = txs.filter(t=>t.type==='expense' && t.paidBy===person && scopeOf(t)!=='fund').reduce((s,t)=>s+Number(t.amount),0);
+  return income - paid;
+}
+
+function savingsEntriesFor(person){
+  return ((STATE.savingsLedger||{}).entries||[]).filter(e => e.by === person);
+}
+// "netSaved" nets out that person's own withdrawals/repayments so
+// individual totals actually add up to the ledger's combinedTotal — a raw
+// contribution-only sum wouldn't reconcile once anyone's ever withdrawn.
+function savingsTotalsFor(person){
+  let contributed = 0, withdrawn = 0, repaid = 0;
+  savingsEntriesFor(person).forEach(e=>{
+    const amt = Number(e.amount);
+    if(e.type === 'contribution') contributed += amt;
+    else if(e.type === 'withdrawal') withdrawn += amt;
+    else if(e.type === 'repayment') repaid += amt;
+  });
+  return { contributed, withdrawn, repaid, netSaved: contributed + repaid - withdrawn, owedBack: Math.max(0, withdrawn - repaid) };
+}
 
 /* ---------------- render ---------------- */
 function render(){
@@ -504,6 +556,17 @@ function render(){
     `<div class="seg p1" style="left:0;width:${p1pct}%"></div><div class="seg p2" style="left:${p1pct}%;width:${100-p1pct}%"></div>`;
   document.getElementById('p1Label').textContent = `${p1} · ${currency} ${fmt(p1Paid)}`;
   document.getElementById('p2Label').textContent = `${p2} · ${currency} ${fmt(p2Paid)}`;
+
+  // Individual balance — all-time, not scoped to the selected period; see
+  // individualBalanceFor's comment for why.
+  document.getElementById('individualBalanceList').innerHTML = [p1, p2].map(person=>{
+    const bal = individualBalanceFor(person);
+    const cls = bal >= 0 ? 'income' : 'expense';
+    return `<div class="breakdown-row">
+      <span class="br-label">${person}</span>
+      <span class="br-stat ${cls}" style="font-weight:700">${bal<0?'−':''}${currency} ${fmt(Math.abs(bal))}</span>
+    </div>`;
+  }).join('');
 
   // day-by-day (Weekly) / week-by-week (Monthly) breakdown — hidden for Daily
   // since there's nothing to roll up within a single day.
@@ -580,6 +643,41 @@ function render(){
   renderPersonalBudgets(periodTx, currency, p1, p2);
 
   // savings screen
+  // savings screen — combined/individual ledger overview
+  const ledger = STATE.savingsLedger || {combinedTotal:0, entries:[]};
+  document.getElementById('savingsCombinedTotal').textContent = `${currency} ${fmt(ledger.combinedTotal||0)}`;
+  document.getElementById('savingsPersonBreakdown').innerHTML = [p1, p2].map(person=>{
+    const t = savingsTotalsFor(person);
+    const owedHtml = t.owedBack > 0
+      ? `<span class="br-stat" style="color:var(--gold);font-weight:700">Owes back ${currency} ${fmt(t.owedBack)}</span>`
+      : `<span class="br-stat" style="color:var(--paper-dim)">All settled</span>`;
+    return `<div class="breakdown-row">
+      <span class="br-label">${person}</span>
+      <div class="br-stats"><span class="br-stat">${currency} ${fmt(t.netSaved)} saved</span>${owedHtml}</div>
+    </div>`;
+  }).join('');
+
+  // Anyone can withdraw; only whoever currently has an owed-back balance can
+  // repay — the whole Repay card is hidden when nobody owes anything.
+  fillSelect('savingsWithdrawBy', [p1, p2]);
+  const owingPeople = [p1, p2].filter(person => savingsTotalsFor(person).owedBack > 0);
+  const repayCard = document.getElementById('savingsRepayCard');
+  if(owingPeople.length === 0){
+    repayCard.style.display = 'none';
+  }else{
+    repayCard.style.display = '';
+    fillSelect('savingsRepayBy', owingPeople);
+  }
+
+  const savingsEntries = (ledger.entries||[]).slice().sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt)).slice(0,15);
+  const savingsTypeLabel = { contribution: '+ Contribution', withdrawal: '− Withdrawal', repayment: '+ Repayment' };
+  document.getElementById('savingsHistory').innerHTML = savingsEntries.length ? savingsEntries.map(e=>`
+    <div class="fund-entry">
+      <span>${savingsTypeLabel[e.type] || e.type} · ${e.by}${e.note ? ' · '+e.note : ''}</span>
+      <span class="mono ${e.type==='withdrawal'?'minus':'plus'}">${currency} ${fmt(e.amount)}</span>
+    </div>
+  `).join('') : `<div class="empty">No activity yet.</div>`;
+
   document.getElementById('goalsList').innerHTML = (STATE.goals||[]).map(g=>{
     const pct = g.targetAmount>0 ? Math.min(100,(g.currentAmount/g.targetAmount)*100) : 0;
     return `<div class="card goal-card">
@@ -1203,6 +1301,66 @@ document.getElementById('fundSpendBtn').addEventListener('click', ()=>{
 });
 
 document.getElementById('fundHistory').addEventListener('click', ()=>{}); // reserved
+
+/* ---------------- savings (transaction-driven ledger) ---------------- */
+document.getElementById('savingsWithdrawBtn').addEventListener('click', ()=>{
+  const amount = Number(document.getElementById('savingsWithdrawAmount').value);
+  if(!amount || amount<=0){ showToast('Enter an amount'); return; }
+  const by = document.getElementById('savingsWithdrawBy').value;
+  const note = document.getElementById('savingsWithdrawNote').value;
+  const date = new Date().toISOString().slice(0,10);
+  const nowIso = new Date().toISOString();
+  const txId = genId(), ledgerId = genId();
+  // Mirrors addSavingsWithdrawal_: a real income transaction (category
+  // "Income", matching every other income row) plus a "withdrawal" ledger
+  // row linked to it.
+  const applyObjects = (s, tId, lId) => {
+    s.transactions = [...(s.transactions||[]), { id:tId, date, type:'income', amount, category:'Income', paidBy:by, note: note ? ('Savings withdrawal: '+note) : 'Savings withdrawal', createdAt: nowIso, scope:'shared' }];
+    const ledger = s.savingsLedger || {combinedTotal:0, entries:[]};
+    s.savingsLedger = { combinedTotal: ledger.combinedTotal - amount, entries: [...(ledger.entries||[]), { id:lId, type:'withdrawal', amount, by, note, date, createdAt: nowIso, linkedTransactionId: tId }] };
+    return s;
+  };
+  runOptimistic({
+    patch: (s) => applyObjects(s, txId, ledgerId),
+    apiCall: () => apiPost('addSavingsWithdrawal', { amount, by, note, date }),
+    onSuccess: (s, result) => applyObjects(s, result.transactionId, result.id),
+    label: 'Withdraw from savings'
+  });
+  showToast('Withdrawal logged ✓');
+  document.getElementById('savingsWithdrawAmount').value = '';
+  document.getElementById('savingsWithdrawNote').value = '';
+});
+
+document.getElementById('savingsRepayBtn').addEventListener('click', ()=>{
+  const amount = Number(document.getElementById('savingsRepayAmount').value);
+  if(!amount || amount<=0){ showToast('Enter an amount'); return; }
+  const by = document.getElementById('savingsRepayBy').value;
+  const note = document.getElementById('savingsRepayNote').value;
+  const date = new Date().toISOString().slice(0,10);
+  const nowIso = new Date().toISOString();
+  const txId = genId(), ledgerId = genId();
+  // Mirrors addSavingsRepayment_: a real expense transaction (category
+  // "Savings" — same real-money mechanics as a normal contribution) plus a
+  // "repayment" ledger row, kept distinct from "contribution" so it's
+  // auditable as clearing a specific owed-back balance. This never goes
+  // through optimisticAddTransaction/makeTxObjects, so there's no risk of
+  // also triggering their category==="Savings" auto-contribution logic.
+  const applyObjects = (s, tId, lId) => {
+    s.transactions = [...(s.transactions||[]), { id:tId, date, type:'expense', amount, category:'Savings', paidBy:by, note: note ? ('Savings repayment: '+note) : 'Savings repayment', createdAt: nowIso, scope:'shared' }];
+    const ledger = s.savingsLedger || {combinedTotal:0, entries:[]};
+    s.savingsLedger = { combinedTotal: ledger.combinedTotal + amount, entries: [...(ledger.entries||[]), { id:lId, type:'repayment', amount, by, note, date, createdAt: nowIso, linkedTransactionId: tId }] };
+    return s;
+  };
+  runOptimistic({
+    patch: (s) => applyObjects(s, txId, ledgerId),
+    apiCall: () => apiPost('addSavingsRepayment', { amount, by, note, date }),
+    onSuccess: (s, result) => applyObjects(s, result.transactionId, result.id),
+    label: 'Repay savings'
+  });
+  showToast('Repayment logged ✓');
+  document.getElementById('savingsRepayAmount').value = '';
+  document.getElementById('savingsRepayNote').value = '';
+});
 
 /* ---------------- debts ---------------- */
 // Shared optimistic path for creating an IOU, used by the manual "Add IOU"
