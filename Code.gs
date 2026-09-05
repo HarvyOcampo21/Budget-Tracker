@@ -12,7 +12,7 @@
  * (Deploy > Manage deployments > Edit > New version > Deploy).
  *
  * ============================================================
- * SCRIPT VERSION: 1.4.0
+ * SCRIPT VERSION: 1.4.1
  * ------------------------------------------------------------
  * This is this file's OWN version number — it only moves when
  * Code.gs itself changes (a new action, a new sheet/column, a
@@ -26,6 +26,25 @@
  * what changed in the backend.
  * ------------------------------------------------------------
  * CHANGELOG
+ *   v1.4.1 – BUGFIX: every getXxx_() feeding getAllData_() (and
+ *            every other sheet lookup in this file) now goes
+ *            through getOrCreateSheet_ instead of a bare
+ *            getSheetByName. A missing sheet — e.g. SavingsLedger
+ *            on a spreadsheet that was initialized before v1.4.0
+ *            added it — used to make getSheetByName return null,
+ *            and the very next line crashed calling .getDataRange()
+ *            on that null, taking down the ENTIRE dashboard (not
+ *            just the section that needed the missing sheet) with
+ *            "Cannot read properties of null (reading
+ *            'getDataRange')". Root cause: adding a sheet to
+ *            initialize() does not retroactively create it in an
+ *            already-initialized spreadsheet — that only happens
+ *            the next time initialize() is actually re-run by
+ *            hand. getOrCreateSheet_ now also logs when it has to
+ *            create a sheet, so a genuinely missing/renamed sheet
+ *            still leaves a breadcrumb in Executions instead of
+ *            silently masking a real problem behind an
+ *            empty-looking section.
  *   v1.4.0 – Transaction-driven Savings ledger, layered on top of
  *            the existing manual Savings Goals (unchanged). New
  *            SavingsLedger sheet (id, type, amount, by, note,
@@ -298,9 +317,23 @@ function initialize() {
   Logger.log("Accounts can now be created either via the app's own sign-up screen, or manually with createUser_('username','password','Display Name','email@example.com') from this editor.");
 }
 
+// Used everywhere a sheet is looked up — including from every getXxx_()
+// that feeds getAllData_() — specifically so a missing sheet self-heals
+// (creates a new, empty one) instead of getSheetByName returning null and
+// the very next line crashing on it with a null-reference error that takes
+// the ENTIRE dashboard down, not just the one section that needed that
+// sheet. This matters in practice because adding a new sheet to
+// initialize() does NOT retroactively create it in an already-initialized
+// spreadsheet — that only happens the next time initialize() is actually
+// re-run by hand. Logs when this happens so a genuinely missing/renamed
+// sheet still leaves a breadcrumb in Executions instead of silently
+// masking a real problem behind an empty-looking section.
 function getOrCreateSheet_(ss, name) {
   let sh = ss.getSheetByName(name);
-  if (!sh) sh = ss.insertSheet(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    Logger.log('getOrCreateSheet_: "' + name + '" did not exist — created it empty. If this is unexpected, re-run initialize() or check for a renamed/deleted tab.');
+  }
   return sh;
 }
 
@@ -462,7 +495,7 @@ function doPost(e) {
 // instead of parsing free-form error text.
 function checkAuth_(token) {
   if (!token) throw new Error("AUTH: Not logged in");
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SESSIONS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === token) return; // valid session
@@ -491,28 +524,28 @@ function getAllData_() {
 }
 
 function getTransactions_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TX);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.TX);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   return rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
 }
 
 function getCategories_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.CAT);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.CAT);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   return rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
 }
 
 function getGoals_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.GOALS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.GOALS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   return rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
 }
 
 function getSettings_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SETTINGS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SETTINGS);
   const values = sh.getDataRange().getValues();
   const obj = {};
   values.forEach(([k, v]) => { if (k && k !== "key") obj[k] = v; });
@@ -523,7 +556,7 @@ function getSettings_() {
 // authenticated frontend so it can show partner names, and must never leak
 // passwordHash/salt/email even though those live in the same sheet/row.
 function getUsers_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const col = { username: header.indexOf("username"), displayName: header.indexOf("displayName") };
@@ -533,7 +566,7 @@ function getUsers_() {
 }
 
 function getFoodFund_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const entries = rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
@@ -545,7 +578,7 @@ function getFoodFund_() {
 }
 
 function getDebts_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DEBTS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.DEBTS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   return rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
@@ -558,7 +591,7 @@ function getDebts_() {
 // same division of labor as the existing per-person dashboard split, which
 // is also computed client-side from raw transactions rather than here.
 function getSavingsLedger_() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SAVINGS_LEDGER);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const entries = rows.filter(r => r[0] !== "").map(r => rowToObj_(header, r));
@@ -602,7 +635,7 @@ function createUser_(username, password, displayName, email) {
   if (!username || !password) {
     throw new Error("createUser_ needs both a username and a password.");
   }
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const col = {
@@ -643,7 +676,7 @@ function signup_(payload) {
     throw new Error("Username, email, and password are all required.");
   }
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const col = {
@@ -689,7 +722,7 @@ function signup_(payload) {
   newRow[col.createdAt] = new Date().toISOString();
   sh.appendRow(newRow);
 
-  const sessionsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const sessionsSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SESSIONS);
   const token = Utilities.getUuid();
   sessionsSh.appendRow([token, username, new Date().toISOString()]);
 
@@ -706,7 +739,7 @@ function login_(payload) {
   const genericError = "Invalid username or password";
   if (!username || !password) throw new Error(genericError);
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const values = sh.getDataRange().getValues();
   const [header, ...rows] = values;
   const col = {
@@ -722,7 +755,7 @@ function login_(payload) {
   const computedHash = hashPassword_(password, row[col.salt]);
   if (computedHash !== row[col.passwordHash]) throw new Error(genericError);
 
-  const sessionsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const sessionsSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SESSIONS);
   const token = Utilities.getUuid();
   sessionsSh.appendRow([token, username, new Date().toISOString()]);
 
@@ -734,7 +767,7 @@ function login_(payload) {
 // treated as success (logging out is idempotent from the caller's view).
 function logout_(token) {
   if (!token) return { loggedOut: true };
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SESSIONS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === token) {
@@ -750,7 +783,7 @@ function logout_(token) {
 // moment the real owner regains control of the account — intentional, even
 // though normal login sessions are otherwise permanent by design.
 function invalidateAllSessionsForUser_(username) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SESSIONS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SESSIONS);
   const values = sh.getDataRange().getValues();
   // Walk bottom-up so deleting a row doesn't shift the index of rows still
   // waiting to be checked.
@@ -772,7 +805,7 @@ function requestPasswordReset_(payload) {
   const genericResult = { message: "If that email is registered, a reset code has been sent." };
   if (!email) return genericResult;
 
-  const usersSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const usersSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const values = usersSh.getDataRange().getValues();
   const [header, ...rows] = values;
   const col = { username: header.indexOf("username"), email: header.indexOf("email") };
@@ -782,7 +815,7 @@ function requestPasswordReset_(payload) {
 
   const username = row[col.username];
   const code = generateResetCode_();
-  const resetsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.PASSWORD_RESETS);
+  const resetsSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.PASSWORD_RESETS);
   resetsSh.appendRow([code, username, new Date().toISOString(), false]);
 
   sendResetEmail_(email, code);
@@ -809,7 +842,7 @@ function resetPassword_(payload) {
   const genericError = "That reset code is invalid or has expired.";
   if (!code || !newPassword) throw new Error(genericError);
 
-  const resetsSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.PASSWORD_RESETS);
+  const resetsSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.PASSWORD_RESETS);
   const resetValues = resetsSh.getDataRange().getValues();
   const [resetHeader, ...resetRows] = resetValues;
   const rCol = {
@@ -831,7 +864,7 @@ function resetPassword_(payload) {
 
   const username = match[rCol.username];
 
-  const usersSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.USERS);
+  const usersSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.USERS);
   const userValues = usersSh.getDataRange().getValues();
   const [userHeader, ...userRows] = userValues;
   const uCol = {
@@ -879,7 +912,7 @@ const FOOD_FUND_LABEL = "Food Fund";
 // other caller should ever set this; it's not something a payload should
 // carry, which is why it's a second argument instead of a payload field.
 function addTransaction_(payload, options) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TX);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.TX);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   // Money spent via the Food Fund already left the household's income when it
@@ -917,7 +950,7 @@ function addTransaction_(payload, options) {
 
   // If "Food Fund" was chosen as the payment method, deduct it from the fund
   if (payload.type === "expense" && payload.paidBy === FOOD_FUND_LABEL) {
-    const fundSh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+    const fundSh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
     const fundId = Utilities.getUuid();
     fundSh.appendRow([fundId, "spend", Number(payload.amount), FOOD_FUND_LABEL, payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, id]);
   }
@@ -936,7 +969,7 @@ function addTransaction_(payload, options) {
 }
 
 function deleteTransaction_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TX);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.TX);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
@@ -956,7 +989,7 @@ function deleteTransaction_(id) {
 // (by then at a shifted index), corrupting whatever row came after it.
 // (Added in SCRIPT VERSION 1.0.3.)
 function deleteTransactionRowOnly_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TX);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.TX);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
@@ -967,7 +1000,7 @@ function deleteTransactionRowOnly_(id) {
 }
 
 function deleteFundEntryByTxId_(txId) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][7] === txId) {
@@ -978,7 +1011,7 @@ function deleteFundEntryByTxId_(txId) {
 }
 
 function updateCategoryBudget_(payload) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.CAT);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.CAT);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === payload.name) {
@@ -992,7 +1025,7 @@ function updateCategoryBudget_(payload) {
 
 // Added in SCRIPT VERSION 1.0.2
 function deleteCategoryBudget_(name) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.CAT);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.CAT);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === name) {
@@ -1006,7 +1039,7 @@ function deleteCategoryBudget_(name) {
 // ------- DATA WRITE: savings goals -------
 
 function addGoal_(payload) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.GOALS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.GOALS);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([
@@ -1021,7 +1054,7 @@ function addGoal_(payload) {
 }
 
 function updateGoal_(payload) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.GOALS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.GOALS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === payload.id) {
@@ -1036,7 +1069,7 @@ function updateGoal_(payload) {
 }
 
 function deleteGoal_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.GOALS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.GOALS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
@@ -1048,7 +1081,7 @@ function deleteGoal_(id) {
 }
 
 function updateSettings_(payload) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SETTINGS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SETTINGS);
   const values = sh.getDataRange().getValues();
   Object.keys(payload).forEach(key => {
     let found = false;
@@ -1081,7 +1114,7 @@ function addFoodFundContribution_(payload) {
     scope: "shared"
   });
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([id, "contribution", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0,10), createdAt, tx.id]);
@@ -1104,7 +1137,7 @@ function addFoodFundSpend_(payload) {
     scope: "fund"
   });
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([id, "spend", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0,10), createdAt, tx.id]);
@@ -1112,7 +1145,7 @@ function addFoodFundSpend_(payload) {
 }
 
 function deleteFoodFundEntry_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.FUND);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.FUND);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
@@ -1134,7 +1167,7 @@ function deleteFoodFundEntry_(id) {
 // flow works, so there's nothing for a separate exposed action to do beyond
 // what addTransaction_ already does.
 function addSavingsContribution_(txId, payload, createdAt) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SAVINGS_LEDGER);
   const id = Utilities.getUuid();
   sh.appendRow([id, "contribution", Number(payload.amount), payload.paidBy || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, txId]);
   return { id };
@@ -1158,7 +1191,7 @@ function addSavingsWithdrawal_(payload) {
     scope: "shared"
   });
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SAVINGS_LEDGER);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([id, "withdrawal", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, tx.id]);
@@ -1183,7 +1216,7 @@ function addSavingsRepayment_(payload) {
     scope: "shared"
   }, { skipSavingsHook: true });
 
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SAVINGS_LEDGER);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([id, "repayment", Number(payload.amount), payload.by || "", payload.note || "", payload.date || createdAt.slice(0, 10), createdAt, tx.id]);
@@ -1196,7 +1229,7 @@ function addSavingsRepayment_(payload) {
 // "Savings", so this can't key off category the way the addTransaction_
 // hook does.
 function deleteSavingsLedgerEntryByTxId_(txId) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.SAVINGS_LEDGER);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.SAVINGS_LEDGER);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][7] === txId) {
@@ -1209,7 +1242,7 @@ function deleteSavingsLedgerEntryByTxId_(txId) {
 // ------- DATA WRITE: Debts / IOUs -------
 
 function addDebt_(payload) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DEBTS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.DEBTS);
   const id = Utilities.getUuid();
   const createdAt = new Date().toISOString();
   sh.appendRow([
@@ -1228,7 +1261,7 @@ function addDebt_(payload) {
 }
 
 function settleDebt_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DEBTS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.DEBTS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
@@ -1241,7 +1274,7 @@ function settleDebt_(id) {
 }
 
 function deleteDebt_(id) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DEBTS);
+  const sh = getOrCreateSheet_(SpreadsheetApp.getActiveSpreadsheet(), SHEET_NAMES.DEBTS);
   const values = sh.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (values[i][0] === id) {
